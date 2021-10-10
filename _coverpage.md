@@ -3,6 +3,5 @@
 
 > 梦，不可及，所以可期待...
 
-[CSDN](https://blog.csdn.net/m0_37965018)
-[点击查看](#introduction)
-
+[MY CSDN](https://blog.csdn.net/kyle0349)
+[开始阅读](README.md)
