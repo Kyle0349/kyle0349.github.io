@@ -1,9 +1,8 @@
 * **目录**
   * [根目录（/）](/README)
   * [回到上一级（../）](/README)
-  * [Hadoop](/study/BigData/Hadoop/README)
-  * [HBase](/study/BigData/HBase/README)
-  * [Hive](/study/BigData/Hive/README)
-  * [Flink](/大数据/Flink/README.md)
-  * [Elasticsearch](/study/BigData/Elasticsearch/README)
+  * [Hadoop](大数据/Hadoop/README.md)
+  * [Hive](大数据/Hive/README.md)
+  * [Spark](大数据/Spark/README.md)
+  * [Flink](大数据/Flink/README.md)
 
