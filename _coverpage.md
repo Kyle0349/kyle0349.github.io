@@ -3,6 +3,6 @@
 
 > 梦，不可及，所以可期待...
 
-[MY CSDN](https://blog.csdn.net/kyle0349)
+[MY GitHub](https://github.com/Kyle0349/kyle0349.github.io)
 [开始阅读](README.md)
 
