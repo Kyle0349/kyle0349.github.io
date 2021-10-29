@@ -48,12 +48,270 @@
 
 
 
+# 2.idea快速搭建Flink Maven项目
 
-# 2.Flink的流式梳理API
+## 2.1 批处理方式实现worlfdCount
 
-+ a
-+ b
-  + c
+> Flink提供了很多直接读取文件的API对数据进行批处理，代码示例使用【readTextFile】api
+>
+> Flink对接数据源API：链接
+
+pom.xml文件
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.kyle</groupId>
+    <artifactId>learn</artifactId>
+    <version>1.0-SNAPSHOT</version>
+
+    <properties>
+        <maven.compiler.source>8</maven.compiler.source>
+        <maven.compiler.target>8</maven.compiler.target>
+        <flink.version>1.12.5</flink.version>
+        <scala.binary.version>2.12</scala.binary.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-java</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-streaming-java_${scala.binary.version}</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.flink</groupId>
+            <artifactId>flink-clients_${scala.binary.version}</artifactId>
+            <version>${flink.version}</version>
+        </dependency>
+    </dependencies>
+
+</project>
+```
+
+java代码
+
+```java
+package com.day1.wc;
+
+import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.api.java.ExecutionEnvironment;
+import org.apache.flink.api.java.operators.AggregateOperator;
+import org.apache.flink.api.java.operators.DataSource;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.util.Collector;
+
+public class WordCount {
+
+    public static void main(String[] args) throws Exception {
+        // 创建执行环境
+        ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
+
+        // 从文件中读取数据
+        String inputPath = "/Users/kyle/Documents/kyle/project/flink/learn/src/main/resources/hello.txt";
+
+        DataSource<String> inputDataSet = env.readTextFile(inputPath);
+
+        // 对数据集进行处理, 按空格分词展开，转换成（word, 1）这样的元祖进行统计
+        AggregateOperator<Tuple2<String, Integer>> resultSet = inputDataSet.flatMap(new MyFlatMapper())
+                .groupBy(0) // 按照第一个位置的word分组
+                .sum(1);// 将第二个位置上的数据求和
+
+        resultSet.print();
+
+    }
+
+    public static class MyFlatMapper implements FlatMapFunction<String, Tuple2<String, Integer>>{
+
+        @Override
+        public void flatMap(String value, Collector<Tuple2<String, Integer>> collector) throws Exception {
+            // 按空格分词
+            String[] words = value.split(" ");
+            // 遍历所有word， 包装二元组输出
+            for (String word : words) {
+                collector.collect(new Tuple2<>(word, 1));
+            }
+        }
+    }
+
+}
+
+```
+
+在resource文件夹下创建hellt.txt
+
+```
+hello word
+hello flink
+hello spark
+hello scala
+hi susu
+hi kyle
+susu and kyle
+```
+
+代码输出内容：
+
+```
+(spark,1)
+(and,1)
+(kyle,2)
+(flink,1)
+(susu,2)
+(hi,2)
+(scala,1)
+(word,1)
+(hello,4)
+```
+
+## 2.2 流处理方式实现worldCount
+
+java代码
+
+```java
+package com.day1.wc;
+
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+
+public class StreamWordcount {
+
+    public static void main(String[] args) throws Exception {
+
+        // 创建流处理执行环境
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        env.setParallelism(8);
+
+        String inputpath = "/Users/kyle/Documents/kyle/project/flink/learn/src/main/resources/hello.txt";
+
+        DataStreamSource<String> inputStream = env.readTextFile(inputpath);
+
+        // 基于数据流进行转换计算
+        SingleOutputStreamOperator<Tuple2<String, Integer>> resultSet = inputStream.flatMap(new WordCount.MyFlatMapper())
+                .keyBy(0)
+                .sum(1);
+
+        resultSet.print();
+
+        // 执行任务
+         env.execute();
+    }
+
+}
+
+```
+
+输出：
+
+```
+3> (hello,1)
+6> (word,1)
+2> (susu,1)
+3> (hi,1)
+2> (susu,2)
+2> (kyle,1)
+8> (and,1)
+1> (spark,1)
+3> (hello,2)
+2> (kyle,2)
+3> (hi,2)
+1> (scala,1)
+3> (hello,3)
+7> (flink,1)
+3> (hello,4)
+```
+
+
+
+## 2.3 通过NC模拟实时数据测试流式处理（Socket流读取数据）
+
+java代码
+
+```java
+package com.day1.wc;
+
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+
+public class StreamWordcountNC {
+
+    public static void main(String[] args) throws Exception {
+
+        // 创建流处理执行环境
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        env.setParallelism(8);
+
+        String hostname = "localhost";
+        int port = 9999;
+        DataStreamSource<String> inputStream = env.socketTextStream(hostname, port);
+
+        // 基于数据流进行转换计算
+        SingleOutputStreamOperator<Tuple2<String, Integer>> resultSet = inputStream.flatMap(new WordCount.MyFlatMapper())
+                .keyBy(0)
+                .sum(1);
+
+        resultSet.print();
+
+        // 执行任务
+        env.execute("SocketStreamTest");
+
+    }
+
+}
+
+```
+
+输出：
+
+![image-20211029082426839](https://tva1.sinaimg.cn/large/008i3skNgy1gvvvh7r78cj320e0reaem.jpg)
+
+## 2.4 批处理和流处理对比
+
+1. 创建执行环境不同
+
+   批处理：ExecutionEnvironment env = ExecutionEnvironment.getExecutionEnvironment();
+
+   流处理：StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+2. 输出结果不同
+
+   批处理：直接输出总的结果，没有每行的计算过程
+
+   流处理：一行行的统计结果都输出，有明显的计算过程，体现出流处理的来一条数据处理一条数据。输出结果前面的数字是线程编号。
+
+3. 聚合计算API不同
+
+   批处理：groupby()
+
+   ​	对数据进行分组，前提是要处理的一批数据都要已经上报到达了，可以一次性读取到，
+
+   流处理：keyby()
+
+   ​	流处理的思想是数据来一条处理一条，不需要等数据到到达才处理，所以这里的意思是按照指定的key（默认hashcode）进行重分区的操作。进过keyby()后，数据分到哪里去是跟数据的key相关的。注意看输出结果，会发现相同的单次出现在相同的线程编号中。
+
+4. 任务执行
+
+   批处理：逻辑代码写完后，不需要特意调用API执行任务
+
+   流处理：逻辑代码写完后， 需要调用env.execute();来把流人物调起来，等待数据到了再进行计算。
+
+
+
+
 
 # 3.Flink SQL
 
