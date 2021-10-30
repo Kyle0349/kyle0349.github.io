@@ -50,12 +50,6 @@
 
 # 2.idea快速搭建Flink Maven项目
 
-## 2.1 批处理方式实现worlfdCount
-
-> Flink提供了很多直接读取文件的API对数据进行批处理，代码示例使用【readTextFile】api
->
-> Flink对接数据源API：链接
-
 pom.xml文件
 
 ```xml
@@ -96,6 +90,12 @@ pom.xml文件
 
 </project>
 ```
+
+## 2.1 批处理方式实现worlfdCount
+
+> Flink提供了很多直接读取文件的API对数据进行批处理，代码示例使用【readTextFile】api
+>
+> Flink对接数据源API：链接
 
 java代码
 
@@ -242,6 +242,7 @@ java代码
 package com.day1.wc;
 
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -250,14 +251,14 @@ public class StreamWordcountNC {
 
     public static void main(String[] args) throws Exception {
 
+        ParameterTool parameterTool = ParameterTool.fromArgs(args);
+        String host = parameterTool.get("host");
+        int port = parameterTool.getInt("port");
+
         // 创建流处理执行环境
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-
         env.setParallelism(8);
-
-        String hostname = "localhost";
-        int port = 9999;
-        DataStreamSource<String> inputStream = env.socketTextStream(hostname, port);
+        DataStreamSource<String> inputStream = env.socketTextStream(host, port);
 
         // 基于数据流进行转换计算
         SingleOutputStreamOperator<Tuple2<String, Integer>> resultSet = inputStream.flatMap(new WordCount.MyFlatMapper())
@@ -269,8 +270,8 @@ public class StreamWordcountNC {
         // 执行任务
         env.execute("SocketStreamTest");
 
-    }
 
+    }
 }
 
 ```
@@ -309,11 +310,85 @@ public class StreamWordcountNC {
 
    流处理：逻辑代码写完后， 需要调用env.execute();来把流人物调起来，等待数据到了再进行计算。
 
+# 3.Flink 运行时架构
+
+## 3.1 Flink运行时的组件
+
+- <font size=4, color='pink'>Job Manager(作业管理器)</font>
+  1. 控制一个应用程序执行的主程序，每个应用程序都会被一个不同的JobManager所控制执行。
+  2. JobManager会先接收到要执行的应用程序，这个应用程序会包括：JobGraph(作业图)，logical dataflow graph(逻辑数据流图)，和打包了所有的类，库以及其他资源的JAR包
+  3. JobManager把JobGraph转换成一个物理层面的数据流图，也就是“执行图”（ExecutionGraph）。
+  4. JobManager会想ResourceManager（资源管理器）请求执行任务必要的资源，也就是TaskManager（任务管理器）的slot（插槽）。一旦获取到足够的资源，就会将“执行图”发到真正运行它们的TaskManager上。
+  5. 在TaskManager运行过程中，JobManager会负责所有需要中央协调的操作，比如checkpoints(检查点)的协调
+
+
+
+- <font size=4, color='pink'>Task Manager(任务执行器)</font>
+
+  1. Flink中的工作进程。通常在Flink中会有多个TaskManager运行，每一个TaskManager都包含了一定数量的slot（插槽）。插槽的数量限制了TaskManager能够执行的任务数量
+  2. 启动后，TaskManager会向资源管理器注册她的插槽，收到资源管理器的指令后，TaskManager就会将一个或多个slot提供给JobManager调用，JobManager就可以向slot分配task来执行。
+  3. 在执行的过程中，一个TaskManager可以跟其它运行在同一个程序的TaskManager交换数据，
+  
+  相关参数：
+  
+  taskmanager.memory.process.size
+
+| Flink Memory Model |      | taskmanager.memory.process.size(M) |         |
+| ------------------ | ---- | ---------------------------------- | ------- |
+|                    |      | 2048m                              | 4096m   |
+| Framework Heap     |      | 128                                | 128     |
+| Task Heap          |      | 538                                | 1454.08 |
+| Managed Memory     |      | 635                                | 1372.16 |
+| Framework Off-Heap |      | 128                                | 128     |
+| Task Off-Heap      |      | 0                                  | 0       |
+| Network            |      | 159                                | 343     |
+| JVM Metaspace      |      | 256                                | 256     |
+| JVM Overhead       |      | 205                                | 410     |
+
+
+
+- Resource Manager(资源管理器)
+
+  1. 主要负责管理TaskManager的slot， slot是Flink中定义的处理资源单元
+  2. Flink为不同的环境和资源管理工具提供了不同的资源管理器，比如YARN,Mesos,K8s,以及standalone部署
+  3. 当JobManager申请slot资源时，ResourceManager会将有空闲slot的TaskManager分配给JobManager。如果ResourceManager没有足够的slot来满足JobManager的请求，它还可以向资源提供平台发起会话，已提供启动TaskManager进程的容器。
+
+- Dispacher(分发器)
+
+  1. 可以跨作业运行，为【应用提交】提供了rest接口
+  2. 当一个应用被提交执行时，Dispacher就会启动并将应用移交给一个JobManager
+  3. Dispatcher也会启动一个Web UI，用来方便地展示和监控作业的执行信息
+  4. Dispatcher在架构中不是必需的。处决于【应用提交】运行的方式
 
 
 
 
-# 3.Flink SQL
+
+## 3.2 任务提交流程
+
+
+
+## 3.3 任务调度原理
+
+
+
+
+
+## 3.4 思考
+
+- 怎样实现并行计算（019）
+
+  答：多线程，不同的任务分配到不同的线程上。不同的slot其实就是执行不同的任务。
+
+- 并行任务，需要占用多少slot（019）
+
+  答：跟当前任务设置并行度最大值有关
+
+- 一个流处理程序，到底包含多少个任务（019）
+
+  答：
+
+
 
 + 1
 
