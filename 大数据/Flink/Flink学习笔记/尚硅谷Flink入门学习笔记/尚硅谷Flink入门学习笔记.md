@@ -314,7 +314,7 @@ public class StreamWordcountNC {
 
 ## 3.1 Flink运行时的组件
 
-### 3.1.1 <font size=4, color='blue'>Job Manager(作业管理器)</font>
+### 3.1.1 <font color='blue'>Job Manager(作业管理器)</font>
 
 1. 控制一个应用程序执行的主程序，每个应用程序都会被一个不同的JobManager所控制执行。
 2. JobManager会先接收到要执行的应用程序，这个应用程序会包括：JobGraph(作业图)，logical dataflow graph(逻辑数据流图)，和打包了所有的类，库以及其他资源的JAR包
@@ -322,21 +322,19 @@ public class StreamWordcountNC {
 4. JobManager会想ResourceManager（资源管理器）请求执行任务必要的资源，也就是TaskManager（任务管理器）的slot（插槽）。一旦获取到足够的资源，就会将“执行图”发到真正运行它们的TaskManager上。
 5. 在TaskManager运行过程中，JobManager会负责所有需要中央协调的操作，比如checkpoints(检查点)的协调
 
-
-
-### 3.1.2 <font size=4, color='blue'>Task Manager(任务执行器)</font>
+### 3.1.2 <font color='blue'>Task Manager(任务执行器)</font>
 
 1. Flink中的工作进程。通常在Flink中会有多个TaskManager运行，每一个TaskManager都包含了一定数量的slot（插槽）。插槽的数量限制了TaskManager能够执行的任务数量
 2. 启动后，TaskManager会向资源管理器注册她的插槽，收到资源管理器的指令后，TaskManager就会将一个或多个slot提供给JobManager调用，JobManager就可以向slot分配task来执行。
 3. 在执行的过程中，一个TaskManager可以跟其它运行在同一个程序的TaskManager交换数据，
 
-### 3.1.3 <font size=4, color='blue'>Resource Manager(资源管理器)</font>
+### 3.1.3 <font color='blue'>Resource Manager(资源管理器)</font>
 
 1. 主要负责管理TaskManager的slot， slot是Flink中定义的处理资源单元
 2. Flink为不同的环境和资源管理工具提供了不同的资源管理器，比如YARN,Mesos,K8s,以及standalone部署
 3. 当JobManager申请slot资源时，ResourceManager会将有空闲slot的TaskManager分配给JobManager。如果ResourceManager没有足够的slot来满足JobManager的请求，它还可以向资源提供平台发起会话，已提供启动TaskManager进程的容器。
 
-### 3.1.4 <font size=4, color='blue'>Dispacher(分发器)</font>
+### 3.1.4 <font color='blue'>Dispacher(分发器)</font>
 
 1. 可以跨作业运行，为【应用提交】提供了rest接口
 2. 当一个应用被提交执行时，Dispacher就会启动并将应用移交给一个JobManager
