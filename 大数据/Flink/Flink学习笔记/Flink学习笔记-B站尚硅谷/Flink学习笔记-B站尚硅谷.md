@@ -36,13 +36,13 @@
 
   Spark Streaming是Spark为了流式处场景推出的方案，思想是将时间无限缩小，达到感知上的流处理，本质是微批处理，因为Spark的RDD模型决定对数据形成一个个集合进行批处理，Spark Streaming底层也是Spark Core的RDD模型，所以Spark Streaming的DStream实际就是一个个小批数据RDD集合。
 
-  <img src="https://raw.githubusercontent.com/Kyle0349/kyle0349.github.io/main/大数据/Flink/Flink学习笔记/尚硅谷Flink入门学习笔记/pic/spark_dstream_01.png" alt="spark streaming dstream" style="zoom:50%;" />
+  <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gvypxt24qlj310006qgm8.jpg" alt="spark streaming dstream" style="zoom:70%;" />
 
 + Flink
 
   Flink 是基于**事件**驱动的，事件可以理解为消息。事件驱动的应用程序是一种状态应用程序，它会从一个或者多个流中注入事件，通过触发计算更新状态，或外部动作对注入的事件作出反应。
 
-  <img src="https://raw.githubusercontent.com/Kyle0349/kyle0349.github.io/main/大数据/Flink/Flink学习笔记/尚硅谷Flink入门学习笔记/pic/flink_stream_01.png" style="zoom:50%;" />
+  <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gvypx01ny3j30mm09cwf5.jpg" style="zoom:80%;" />
 
 
 
