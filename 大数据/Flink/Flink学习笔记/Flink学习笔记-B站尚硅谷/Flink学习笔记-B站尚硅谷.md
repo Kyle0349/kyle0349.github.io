@@ -1107,17 +1107,385 @@ env.execute();
    
    resUnionStream.print("resUnion");
    
-   
    env.execute();
    ~~~
 
    
 
+## 4.4 Flink支持的数据类型
+
+### 4.4.1 基础数据类型
+
+​	Flink 支持所有的 Java 和 Scala 基础数据类型，Int, Double, Long, String, …
+
+### 4.4.2 **Java** **和** **Scala** 元组（Tuples）
+
+### 4.4.3  **Scala** 样例类（case classes）
+
+### 4.4.4 其他（Arrays， Lists， Maps，Enums 等）
+
+
+
+## 4.5 UDF 函数 --- 更细粒度的控制流
+
+> Flink 暴露了所有udf函数的接口（实现方式为接口或者抽象类）。例如MapFunciton，FilterFuncion， ProcessFunction...
+
+### 4.5.1 普通UDF
+
+~~~java
+package com.kyle.api.udf;
+
+import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+
+/**
+ * @author kyle on 2021-11-20 7:30 上午
+ */
+public class FlinkUDFTest_01 {
+
+   public static void main(String[] args) throws Exception {
+
+      StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+      DataStreamSource<String> dataStreamSource = env.readTextFile("/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor.txt");
+      
+      SingleOutputStreamOperator<String> sensor_01Stream = dataStreamSource.filter(new KeyWordFilter("sensor_01"));
+      sensor_01Stream.print();
+
+      env.execute();
+
+   }
    
+   public static class KeyWordFilter implements FilterFunction<String>{
+      private String keyWord;
+
+      public KeyWordFilter(String keyWord) {
+         this.keyWord = keyWord;
+      }
+
+      @Override
+      public boolean filter(String value) throws Exception {
+         return value.contains(this.keyWord);
+      }
+   }
+
+}
+
+~~~
+
+### 4.5.2 RicUDF
+
+>richUDF的功能很强大，可以获取上下文很多信息
+>
+>疑问：RichFunction中的 open的什么周期是？？？
+
+1. 在RichFunction中可以做初始化的工作， 比如初始化一些映射，建立外部数据库链接，这样可以在一个substask中只建立一个
+
+2. 可以获取广播变量，减少广播变量的次数
+
+3. 这里有点类似spark的foreachPartition
+
+   ~~~java
+   package com.kyle.api.udf;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.api.common.functions.RichMapFunction;
+   import org.apache.flink.api.java.tuple.Tuple2;
+   import org.apache.flink.api.java.tuple.Tuple3;
+   import org.apache.flink.api.java.tuple.Tuple4;
+   import org.apache.flink.configuration.Configuration;
+   import org.apache.flink.streaming.api.datastream.DataStream;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   
+   import java.util.ArrayList;
+   import java.util.HashMap;
+   import java.util.List;
+   
+   /**
+    * @author kyle on 2021-11-20 7:49 上午
+    */
+   public class FlinkUDFTest_02Rich {
+   
+      public static void main(String[] args) throws Exception {
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+         DataStreamSource<String> dataStreamSource = env.readTextFile("/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor.txt");
+   
+         env.setParallelism(3);
+   
+         SingleOutputStreamOperator<SensorReading> projoStream = dataStreamSource.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         ArrayList<HashMap<String, String>> sensorCodes = new ArrayList<>();
+         HashMap<String, String> sensorCode = new HashMap<>();
+         sensorCode = sensorCode;
+         sensorCode.put("sensor_01", "1楼");
+         sensorCode.put("sensor_02", "2楼");
+         sensorCode.put("sensor_03", "3楼");
+         sensorCode.put("sensor_04", "4楼");
+         sensorCodes.add(sensorCode);
+         DataStreamSource<HashMap<String, String>> sensorStream = env.fromElements(sensorCode);
+   
+         SingleOutputStreamOperator<Tuple4<String, String, Double, Integer>> richMapStream = projoStream.map(new MyRichMap());
+   
+         richMapStream.print();
+   
+         env.execute();
+   
+      }
+   
+      public static class MyRichMap extends RichMapFunction<SensorReading, Tuple4<String, String, Double,Integer>> {
+         HashMap<String,String> sensorCode;
+         List<HashMap<String, String>> bcSensorCodes;
+   
+         @Override
+         public Tuple4<String, String, Double, Integer> map(SensorReading value) throws Exception {
+   
+            // 通过每个taskManager本地初始化的map获取数据
+            return new Tuple4<>(sensorCode.get(value.getId()), value.getId(), value.getTemperature(),getRuntimeContext().getIndexOfThisSubtask());
+   
+            // 通过广播变量中获取映射数据 注意 广播变量只能用在 DataSet programs
+   //         HashMap<String, String> bcSensorCode = bcSensorCodes.get(0);
+   //         return new Tuple4<>(bcSensorCode.get(value.getId()), value.getId(), value.getTemperature(), getRuntimeContext().getIndexOfThisSubtask());
+   
+         }
+   
+         // 疑问： 这个open的什么周期是？？？
+         @Override
+         public void open(Configuration parameters) throws Exception {
+            // 初始化工作， 一般是用来定义状态，或者建立外部数据库链接，减少数据库链接的次数,
+            // 有点类似spark的 foreachPartition
+            System.out.println("open");
+            sensorCode = new HashMap<>();
+            sensorCode.put("sensor_01", "1楼");
+            sensorCode.put("sensor_02", "2楼");
+            sensorCode.put("sensor_03", "3楼");
+            sensorCode.put("sensor_04", "4楼");
+   
+            // 广播变量，减少广播变量传递次数
+            // Caused by: java.lang.UnsupportedOperationException: Broadcast variables can only be used in DataSet programs
+   //         bcSensorCodes = getRuntimeContext().getBroadcastVariable("sensorCodes");
+   
+         }
+   
+         @Override
+         public void close() throws Exception {
+            // 一般做关闭链接和清空状态的事情
+            System.out.println("close");
+         }
+      }
+   
+   }
+   
+   ~~~
+
+## 4.6 重分区操作，数据在传输中的定义方式
+
+### 4.6.1  shuffle, rebalance, rescale, global
+
+~~~java
+package com.kyle.api.partition;
+
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+
+/**
+ * @author kyle on 2021-11-20 9:09 上午
+ */
+public class PartitionTest_01 {
+
+    public static void main(String[] args) throws Exception {
+
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(4);
+        DataStreamSource<String> dataStreamSource = env.readTextFile("/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor.txt");
+
+        dataStreamSource.print("input");
+
+        // shuffle， 将数据随机打散，随机分布到下游分区中
+        DataStream<String> shuffleStream = dataStreamSource.shuffle();
+        shuffleStream.print("shuffle");
+
+        // rebalance, 以轮询的方式将输出的元素均匀的分配到下游的分区中
+        // 前后两个算子的分区不同的情况下，默认使用的重分区方式就是 rebalance
+        dataStreamSource.rebalance().print("rebalance");
+
+        // rescale, 以轮询的方式将输出的元素按照原来分区数分组的方式均匀的分配到下游的分区
+        // 即，上游是2个分区而下游是4个分区的时候，上游的1个分区以轮询的方式将元素分配到下游其中的两个分区，上游另外1个分区也以轮询的方式将元素分配到下游另外两个分区中
+        // 当 上游有4个分区而下游有2个分区的情况，上游的2个分区将元素分配到下游其中一个分区，上游另外2个分区将元素分配到下游另外一个分区中。
+        // 可以看成是一个分组的重分区，重新平衡的方式
+        dataStreamSource.rescale().print("rescale");
+
+        // global , 将所有数据汇聚到第一个分区中
+        dataStreamSource.global().print("global");
+
+        env.execute();
+
+    }
+
+}
+
+~~~
 
 
 
-​		
+## 4.7 Sink
+
+### 4.7.1 kafka sink
+
+1. 从kafka消费数据处理后写会kafka，形成一条数据管道
+
+   > 遗留问题：脏数据导致的异常处理？？？ 保证数据流正常跑不会因为脏数据的崩溃
+
+   ~~~java
+   package com.kyle.api.sink;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.api.common.serialization.SimpleStringSchema;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.connectors.kafka.FlinkKafkaConsumer;
+   import org.apache.flink.streaming.connectors.kafka.FlinkKafkaProducer;
+   
+   import java.util.Properties;
+   
+   /**
+    * @author kyle on 2021-11-20 9:39 上午
+    */
+   public class SinkTesk01_kafka {
+   
+      public static void main(String[] args) throws Exception {
+   
+         Properties properties = new Properties();
+         properties.setProperty("bootstrap.servers", "192.168.2.113:9092");
+         properties.setProperty("group.id", "flink-group");
+         String inputTopic = "my_log";
+   
+         FlinkKafkaConsumer<String> stringFlinkKafkaConsumer = new FlinkKafkaConsumer<>(inputTopic, new SimpleStringSchema(), properties);
+         stringFlinkKafkaConsumer.setStartFromLatest();
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+   
+         DataStreamSource<String> kafkaSource = env.addSource(stringFlinkKafkaConsumer);
+   
+         env.setParallelism(1);
+   
+         SingleOutputStreamOperator<String> mapStream = kafkaSource.map(new MapFunction<String, String>() {
+            @Override
+            public String map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2])).toString();
+            }
+         });
+   
+         Properties sinkProperties = new Properties();
+         sinkProperties.setProperty("bootstrap.servers", "192.168.2.113:9092");
+         FlinkKafkaProducer<String> stringFlinkKafkaProducer = new FlinkKafkaProducer<String>("from_flink", new SimpleStringSchema(), sinkProperties);
+   
+         mapStream.addSink(stringFlinkKafkaProducer);
+         env.execute();
+   
+      }
+   
+   }
+   
+   ~~~
+
+### 4.7.2 redis
+
+1. 将数据写入redis
+
+   ~~~java
+   package com.kyle.api.sink;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.connectors.redis.RedisSink;
+   import org.apache.flink.streaming.connectors.redis.common.config.FlinkJedisPoolConfig;
+   import org.apache.flink.streaming.connectors.redis.common.mapper.RedisCommand;
+   import org.apache.flink.streaming.connectors.redis.common.mapper.RedisCommandDescription;
+   import org.apache.flink.streaming.connectors.redis.common.mapper.RedisMapper;
+   
+   /**
+    * @author kyle on 2021-11-20 10:45 上午
+    */
+   public class SinkTest02_redis {
+   
+      public static void main(String[] args) throws Exception {
+   
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+         DataStreamSource<String> dataStreamSource = env.readTextFile("/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor.txt");
+   
+         env.setParallelism(1);
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = dataStreamSource.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         // 定义redis jedis 链接配置
+         FlinkJedisPoolConfig config = new FlinkJedisPoolConfig.Builder()
+                 .setHost("127.0.0.1")
+                 .setPort(6380)
+                 .build();
+   
+         RedisSink<SensorReading> sensorReadingRedisSink = new RedisSink<>(config, new MyRedisMapper());
+         mapStream.addSink(sensorReadingRedisSink);
+   
+         env.execute();
+   
+      }
+   
+      // 自定义redisMapper
+      public static class MyRedisMapper implements RedisMapper<SensorReading>{
+   
+         // 定义保存数据到redis的命令, 存成hash表，hset sensor_temp id temperature
+         @Override
+         public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.HSET, "sensor_tmp");
+         }
+   
+         @Override
+         public String getKeyFromData(SensorReading sensorReading) {
+            return sensorReading.getId();
+         }
+   
+         @Override
+         public String getValueFromData(SensorReading sensorReading) {
+            return sensorReading.getTemperature().toString();
+         }
+      }
+   
+   }
+   
+   ~~~
+
+   <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gwlg8n3pbvj30uc0n4td6.jpg" alt="flink_parallelism_01" style="zoom:50%;" />
+
+### 4.7.3 Elasticsearch
+
+
+
+
 
 
 
