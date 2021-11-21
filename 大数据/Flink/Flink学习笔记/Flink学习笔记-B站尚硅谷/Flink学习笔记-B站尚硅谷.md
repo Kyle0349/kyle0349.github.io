@@ -1647,7 +1647,27 @@ public class PartitionTest_01 {
    
    ~~~
 
-   
+## 4.8 关于sink的总结
+
+### 4.8.1 sink的类型
+
+1. 目前主流的流组件如kafka和数据存储ES、mysql、redis等都有官方提供的sink，如果没有可以通过自定义来实现自己特殊的sink。
+
+参考链接https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/connectors/datastream/overview/
+
+<img src="https://tva1.sinaimg.cn/large/008i3skNgy1gwmjzewyqyj30wd0u0437.jpg" alt="flink_parallelism_01" style="zoom:80%;" />
+
+### 4.8.2 实现sink的时候性能问题
+
+1. 注意数据库的压力问题
+2. 注意避免每条数据都进行一次链接操作
+3. 可以考虑分批次写入的可能
+
+
+
+# 5.Window API 窗口函数
+
+
 
 
 
