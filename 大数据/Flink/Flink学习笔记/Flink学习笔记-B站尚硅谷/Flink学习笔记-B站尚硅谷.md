@@ -1176,7 +1176,7 @@ public class FlinkUDFTest_01 {
 
 ### 4.5.2 RicUDF
 
->richUDF的功能很强大，可以获取上下文很多信息
+>RichUDF的功能很强大，可以获取上下文很多信息
 >
 >疑问：RichFunction中的 open的什么周期是？？？
 
@@ -1482,6 +1482,172 @@ public class PartitionTest_01 {
    <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gwlg8n3pbvj30uc0n4td6.jpg" alt="flink_parallelism_01" style="zoom:50%;" />
 
 ### 4.7.3 Elasticsearch
+
+1. 将数据写入ES
+
+   > 以下代码只是简单的api学习调用，跟写入ES相关的性能调优还要后续深入了解。
+
+   ~~~java
+   package com.kyle.api.sink;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.api.common.functions.RuntimeContext;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.connectors.elasticsearch.ElasticsearchSinkFunction;
+   import org.apache.flink.streaming.connectors.elasticsearch.RequestIndexer;
+   import org.apache.flink.streaming.connectors.elasticsearch7.ElasticsearchSink;
+   import org.apache.http.HttpHost;
+   import org.elasticsearch.action.index.IndexRequest;
+   import org.elasticsearch.client.Requests;
+   
+   import java.util.ArrayList;
+   import java.util.HashMap;
+   
+   /**
+    * @author kyle on 2021-11-20 11:26 上午
+    */
+   public class SinkTesk03_Es {
+   
+      public static void main(String[] args) throws Exception {
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+         DataStreamSource<String> dataStreamSource = env.readTextFile("/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor.txt");
+   
+         env.setParallelism(1);
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = dataStreamSource.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         ArrayList<HttpHost> httpHost = new ArrayList<>();
+         httpHost.add(new HttpHost("192.168.2.113", 9200));
+         mapStream.addSink(new ElasticsearchSink.Builder<SensorReading>(httpHost, new MyEsSinkFunction()).build());
+   
+         env.execute();
+   
+      }
+   
+      // 实现自定义的ES写入操作
+      public static class MyEsSinkFunction implements ElasticsearchSinkFunction<SensorReading>{
+   
+         @Override
+         public void process(SensorReading sensorReading, RuntimeContext runtimeContext, RequestIndexer requestIndexer) {
+            // 定义写入的数据source
+            HashMap<String, String> dataSource = new HashMap<>();
+            dataSource.put("id", sensorReading.getId());
+            dataSource.put("temp", sensorReading.getTemperature().toString());
+            dataSource.put("ts", sensorReading.getTimestamp().toString());
+   
+            //创建请求， 作为向es发起的写入命令
+            IndexRequest indexRequest = Requests.indexRequest()
+                    .index("sensor2")
+   //                 .id(sensorReading.getId())
+                    .source(dataSource);
+   
+            // 用index发送请求
+            requestIndexer.add(indexRequest);
+   
+         }
+      }
+   }
+   
+   ~~~
+
+### 4.7.4 自定义Sink --- jdbc
+
+> 在实现sink接口的时候就要考虑链接的问题，切记要避免每条数据链接一次，spark里面使用foreachPartition处理，flink这里使用RichSinkFunction处理
+
+1. 继承RichSinkFunction实现自定义Sink的逻辑
+
+   ~~~java
+   package com.kyle.api.sink;
+   
+   import com.kyle.api.source.SourceTest4_UDF;
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.configuration.Configuration;
+   import org.apache.flink.streaming.api.datastream.DataStreamSink;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
+   
+   import java.sql.Connection;
+   import java.sql.DriverManager;
+   import java.sql.PreparedStatement;
+   
+   /**
+    * @author kyle on 2021-11-21 9:17 上午
+    */
+   public class SinkTest04_UDF_Jdbc {
+   
+      public static void main(String[] args) throws Exception {
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+   //      DataStreamSource<String> dataStreamSource = env.readTextFile("/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor.txt");
+   //
+   //      env.setParallelism(1);
+   //      SingleOutputStreamOperator<SensorReading> mapStream = dataStreamSource.map(new MapFunction<String, SensorReading>() {
+   //         @Override
+   //         public SensorReading map(String s) throws Exception {
+   //            String[] fields = s.split(" ");
+   //            return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+   //         }
+   //      });
+         DataStreamSource<SensorReading> dataStream = env.addSource(new SourceTest4_UDF.MySensorSource());
+         dataStream.addSink(new MyJdbcSink());
+         env.execute();
+   
+      }
+   
+      // 自定义的jdbcSink
+      // 使用richFunction， 避免每来一条数据创建一个数据库链接。
+      public static class MyJdbcSink extends RichSinkFunction<SensorReading>{
+         Connection connection = null;
+         PreparedStatement insertStmt = null;
+         PreparedStatement updateStmt = null;
+   
+         @Override
+         public void open(Configuration parameters) throws Exception {
+            Class.forName("com.mysql.jdbc.Driver");
+            connection = DriverManager.getConnection("jdbc:mysql://192.168.2.113:3306/test", "root", "root");
+            insertStmt = this.connection.prepareStatement("insert into sensor_tmp(id, temp) values(?, ?)");
+            updateStmt = this.connection.prepareStatement("update sensor_tmp set temp = ? where id = ?");
+         }
+   
+         // 没来一条数据， 调用链接， 执行sql
+         @Override
+         public void invoke(SensorReading value, Context context) throws Exception {
+            //直接执行更新语句，如果没有更新，那么插入
+            updateStmt.setDouble(1, value.getTemperature());
+            updateStmt.setString(2, value.getId());
+            updateStmt.execute();
+            if (updateStmt.getUpdateCount() == 0 ){
+               insertStmt.setString(1, value.getId());
+               insertStmt.setDouble(2, value.getTemperature());
+               insertStmt.execute();
+            }
+         }
+   
+         @Override
+         public void close() throws Exception {
+            insertStmt.close();
+            updateStmt.close();
+            connection.close();
+         }
+      }
+   }
+   
+   ~~~
+
+   
 
 
 
