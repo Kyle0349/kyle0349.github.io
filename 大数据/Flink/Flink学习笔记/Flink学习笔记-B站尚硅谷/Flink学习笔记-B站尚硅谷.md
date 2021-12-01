@@ -1259,7 +1259,7 @@ public class FlinkUDFTest_01 {
    
          }
    
-         // 疑问： 这个open的什么周期是？？？
+         // 疑问： 这个open的生命周期是？？？
          @Override
          public void open(Configuration parameters) throws Exception {
             // 初始化工作， 一般是用来定义状态，或者建立外部数据库链接，减少数据库链接的次数,
@@ -1726,7 +1726,709 @@ public class PartitionTest_01 {
 
 
 
-## 5.2 窗口分配器
+## 5.2 窗口分配器 window assigner (开窗)
+
+> 开窗操作
+>
+> - window()方法接收的输入参数是一个WindowAssigner
+> - WindowAssigner负责将每条输入的数据分发到正确的window中
+> - Flink提供了通用的WindowAssigner
+>   - 滚动窗口 (tumbling window)
+>   - 滑动窗口 (sliding window)
+>   - 会话窗口 (session window)
+>   - 全局窗口 (global window)
+>
+> 
+
+### 5.2.1 window() --- 底层开窗api
+
+1. 计数窗口使用底层开窗api的方式会比较复杂， 设计GlobalWindows。建议直接使用 countWindos
+
+   ~~~java
+   package com.kyle.api.window;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.windowing.assigners.*;
+   import org.apache.flink.streaming.api.windowing.time.Time;
+   import org.apache.flink.streaming.api.windowing.triggers.CountTrigger;
+   import org.apache.flink.streaming.api.windowing.triggers.PurgingTrigger;
+   import org.apache.hadoop.fs.shell.Count;
+   
+   /**
+    * @author kyle on 2021-11-23 8:05 上午
+    */
+   public class WindowTest01_TimeWindow {
+   
+      public static void main(String[] args) throws Exception {
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+         DataStreamSource<String> dataStream = env.readTextFile("/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor.txt");
+   
+         env.setParallelism(1);
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = dataStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         mapStream.keyBy("id")
+   //              .window(GlobalWindows.create()).trigger(PurgingTrigger.of(CountTrigger.of(100)));  // 计数滚动窗口， 每100个元素开新窗口。
+   //              .window(SlidingProcessingTimeWindows.of(Time.seconds(15), Time.seconds(5))); // 时间滑动窗口 15秒窗口长度， 5秒滑动长度
+   //              .window(EventTimeSessionWindows.withGap(Time.minutes(1)));   // 会话窗口，1分钟没有新数据则开启新窗口
+                 .window(TumblingProcessingTimeWindows.of(Time.seconds(15))); // 时间滚动窗口
+   
+         env.execute();
+   
+      }
+   
+   }
+   
+   ~~~
+
+2. 各自封装的开窗独立api
+
+   > - 计数窗口使用底层开窗api的方式会比较复杂， 设计GlobalWindows。建议直接使用 countWindos
+   > - 会话窗口没有地理封装的api，使用window
+   > - 时间窗口独立封装的timeWindow在1.14被标记为过时，建议使用底层api Window
+
+   ~~~java
+   package com.kyle.api.window;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.windowing.assigners.EventTimeSessionWindows;
+   import org.apache.flink.streaming.api.windowing.time.Time;
+   
+   /**
+    * @author kyle on 2021-11-23 8:05 上午
+    */
+   public class WindowTest02_TimeWindow {
+   
+      public static void main(String[] args) throws Exception {
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+         DataStreamSource<String> dataStream = env.readTextFile("/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor.txt");
+   
+         env.setParallelism(1);
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = dataStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         mapStream.keyBy("id")
+   //              .countWindow(100, 5); //计数滑动窗口
+                 .countWindow(100);  //计数滚动窗口
+   //              .timeWindow(Time.seconds(15));  //时间滚动窗口
+   //              .timeWindow(Time.seconds(15), Time.seconds(5));  //时间滑动窗口
+         
+         env.execute();
+   
+      }
+   
+   }
+   
+   ~~~
+
+## 5.3 窗口函数 window function
+
+> - 定义了要对窗口中收集的数据做的计算操作
+> - 可以分为两类
+>   - 增量聚合函数
+>     - 实时性更好，计算效率更好，延迟更低
+>   - 全窗口函数
+>     - 可以拿到上下文信息， 更灵活
+>     - 前面计算比较复杂且结果对最后结果意义不大的可以考虑使用全窗口函数
+>     - 归并操作，计算中位数或者百分比分位数 等
+
+### 5.3.1 增量聚合函数 (incremental aggregation functions)
+
+> - 每条数据到来就进行计算，保持一个简单的状态
+> - ReduceFuntion， AggregateFunction
+> - eg.  计算8点到9点的总和，每来一条就聚合一次，把结果状态记住，不输出，直到9点后立马输出
+
+1. AggregateFunction  ---  eg. 滚动时间窗口
+
+   ~~~java
+   package com.kyle.api.window;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.AggregateFunction;
+   import org.apache.flink.api.common.functions.FilterFunction;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.api.common.functions.ReduceFunction;
+   import org.apache.flink.api.java.tuple.Tuple;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.datastream.WindowedStream;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.windowing.assigners.*;
+   import org.apache.flink.streaming.api.windowing.time.Time;
+   import org.apache.flink.streaming.api.windowing.triggers.CountTrigger;
+   import org.apache.flink.streaming.api.windowing.triggers.PurgingTrigger;
+   import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
+   import org.apache.hadoop.fs.shell.Count;
+   import org.apache.logging.log4j.util.Strings;
+   
+   /**
+    * @author kyle on 2021-11-23 8:05 上午
+    */
+   public class WindowTest01_TimeWindow {
+   
+      public static void main(String[] args) throws Exception {
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+          
+          DataStreamSource<String> inputStream = env.socketTextStream("localhost", 9999);
+          SingleOutputStreamOperator<String> filterStream = inputStream.filter(new FilterFunction<String>() {
+              @Override
+              public boolean filter(String value) throws Exception {
+                  return Strings.isNotBlank(value);
+              }
+          });
+   
+          env.setParallelism(1);
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = filterStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         SingleOutputStreamOperator<Integer> aggregateStream = mapStream.keyBy("id")
+   //              .window(GlobalWindows.create()).trigger(PurgingTrigger.of(CountTrigger.of(100)));  // 计数滚动窗口， 每100个元素开新窗口。
+   //              .window(SlidingProcessingTimeWindows.of(Time.seconds(15), Time.seconds(5))); // 时间滑动窗口 15秒窗口长度， 5秒滑动长度
+   //              .window(EventTimeSessionWindows.withGap(Time.minutes(1)));   // 会话窗口，1分钟没有新数据则开启新窗口
+                 .window(TumblingProcessingTimeWindows.of(Time.seconds(15)))// 时间滚动窗口
+   
+                 .aggregate(new AggregateFunction<SensorReading, Integer, Integer>() {
+                    @Override
+                    public Integer createAccumulator() {
+                       return 0;
+                    }
+   
+                    @Override
+                    public Integer add(SensorReading value, Integer accumulator) {
+                       return accumulator + 2;
+                    }
+   
+                    @Override
+                    public Integer getResult(Integer accumulator) {
+                       return accumulator;
+                    }
+   
+                    @Override
+                    public Integer merge(Integer a, Integer b) {
+                       return a + b;
+                    }
+                 });
+   
+         aggregateStream.print();
+         env.execute();
+      }
+     
+   }
+   ~~~
+
+   
+
+2. AggregateFunction  ---  eg. 滑动计数窗口
+
+   ~~~java
+   package com.kyle.api.window;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.AggregateFunction;
+   import org.apache.flink.api.common.functions.FilterFunction;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.api.java.tuple.Tuple;
+   import org.apache.flink.api.java.tuple.Tuple2;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.functions.windowing.WindowFunction;
+   import org.apache.flink.streaming.api.windowing.windows.GlobalWindow;
+   import org.apache.flink.util.Collector;
+   import org.apache.logging.log4j.util.Strings;
+   
+   import java.lang.annotation.Documented;
+   
+   /**
+    * @author kyle on 2021-11-23 8:05 上午
+    */
+   public class WindowTest05_CountWindow_Incremental {
+   
+      public static void main(String[] args) throws Exception {
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+   
+          DataStreamSource<String> inputStream = env.socketTextStream("localhost", 9999);
+          SingleOutputStreamOperator<String> filterStream = inputStream.filter(new FilterFunction<String>() {
+              @Override
+              public boolean filter(String value) throws Exception {
+                  return Strings.isNotBlank(value);
+              }
+          });
+   
+          env.setParallelism(1);
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = filterStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         // 计算平均值
+          SingleOutputStreamOperator<Double> avgStream = mapStream.keyBy("id")
+   //              .window(GlobalWindows.create()).trigger(PurgingTrigger.of(CountTrigger.of(100)));  // 计数滚动窗口， 每100个元素开新窗口。
+   //              .window(SlidingProcessingTimeWindows.of(Time.seconds(15), Time.seconds(5))); // 时间滑动窗口 15秒窗口长度， 5秒滑动长度
+   //              .window(EventTimeSessionWindows.withGap(Time.minutes(1)));   // 会话窗口，1分钟没有新数据则开启新窗口
+                  .countWindow(5, 2)
+                  .aggregate(new MyAvgTempCounter());
+   
+          avgStream.print();
+   
+         env.execute();
+   
+      }
+   
+      public static class MyAvgTempCounter implements AggregateFunction<SensorReading, Tuple2<Double, Integer>, Double>{
+   
+          @Override
+          public Tuple2<Double, Integer> createAccumulator() {
+              return new Tuple2<>(0.0, 0);
+          }
+   
+          @Override
+          public Tuple2<Double, Integer> add(SensorReading value, Tuple2<Double, Integer> accumulator) {
+              return new Tuple2<>(accumulator.f0 + value.getTemperature(), accumulator.f1 + 1);
+          }
+   
+          @Override
+          public Double getResult(Tuple2<Double, Integer> accumulator) {
+              return accumulator.f0 / accumulator.f1;
+          }
+   
+          @Override
+          public Tuple2<Double, Integer> merge(Tuple2<Double, Integer> a, Tuple2<Double, Integer> b) {
+              return new Tuple2<>(a.f0 + b.f0, a.f1 + b.f1);
+          }
+      }
+   
+   }
+   
+   ~~~
+
+   
+
+
+
+
+
+### 5.3.2 全窗口函数 (full window functions)
+
+> - 先把窗口所有数据收集起来，等到计算的时候会遍历所有函数
+> - ProcessWindowFunction, WindowFunction
+> - 类似批处理
+> - eg. 来一条保存一条，保存所有函数，不保存状态，窗口结束的时候拿出所有数据计算再输出结果
+
+1. ProcessWindowFunction
+
+   > 滚动计数窗口，计算每个sensor出现温度最多次数的温度
+   >
+   > 需要传4个参数：
+   >
+   > <IN> – The type of the input value.  --- 调用keyby的流的类型
+   > <OUT> – The type of the output value.  --- 窗口函数返回的类型
+   > <KEY> – The type of the key.   --- 
+   > <W> – The type of Window that this window function can be applied on.   --- 需要实现窗口的类型，
+
+   ~~~java
+   package com.kyle.api.window;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.FilterFunction;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.api.java.tuple.Tuple;
+   import org.apache.flink.api.java.tuple.Tuple2;
+   import org.apache.flink.api.java.tuple.Tuple3;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
+   import org.apache.flink.streaming.api.windowing.time.Time;
+   import org.apache.flink.streaming.api.windowing.windows.GlobalWindow;
+   import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
+   import org.apache.flink.util.Collector;
+   import org.apache.logging.log4j.util.Strings;
+   
+   import java.util.*;
+   
+   /**
+    * @author kyle on 2021-11-25 8:09 上午
+    */
+   public class WindowTest04_CountWindow_Full {
+   
+      public static void main(String[] args) throws Exception {
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+   
+          DataStreamSource<String> inputStream = env.socketTextStream("localhost", 9999);
+          SingleOutputStreamOperator<String> filterStream = inputStream.filter(new FilterFunction<String>() {
+              @Override
+              public boolean filter(String value) throws Exception {
+                  return Strings.isNotBlank(value);
+              }
+          });
+   
+          env.setParallelism(1);
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = filterStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         // 计算每个sensor出现温度最多次数的温度
+          SingleOutputStreamOperator<Tuple3<String, Double, Integer>> process = mapStream.keyBy("id")
+                  .countWindow(3)
+                  .process(new MyFrequencyFunction());
+   
+          process.print();
+          env.execute();
+   
+      }
+   
+   
+      // 自定义一个全窗口函数
+      public static class MyFrequencyFunction extends ProcessWindowFunction<SensorReading, Tuple3<String, Double, Integer>, Tuple, GlobalWindow>{
+          @Override
+          public void process(Tuple tuple, Context context, Iterable<SensorReading> elements, Collector<Tuple3<String, Double, Integer>> out) throws Exception {
+              HashMap<Double, Integer> countMap = new HashMap<Double, Integer>();
+              for (SensorReading element : elements) {
+                  int count = countMap.getOrDefault(element.getTemperature(), 0);
+                  countMap.put(element.getTemperature(), count + 1);
+              }
+   
+              ArrayList<Map.Entry<Double, Integer>> entries = new ArrayList<>(countMap.entrySet());
+              entries.sort(new Comparator<Map.Entry<Double, Integer>>() {
+                  @Override
+                  public int compare(Map.Entry<Double, Integer> o1, Map.Entry<Double, Integer> o2) {
+                      return o2.getValue() - o1.getValue();
+                  }
+              });
+   
+              out.collect(new Tuple3<String, Double, Integer>(tuple.getField(0), entries.get(0).getKey(), entries.get(0).getValue()));
+          }
+   
+      }
+   
+   }
+   
+   ~~~
+
+### 5.3.3 窗口中延迟数据处理API 
+
+> 达到数据的尽快接近真实输出，保证数据最后的绝对准确。
+>
+> 注意：这种场景下只针对事件事件的窗口有意义
+
+1. 在窗口没有关闭前允许一定时间的延迟
+
+   > .allowedLateness --- 允许处理迟到的数据
+
+   疑问：对迟到数据的定义，开一个8点到9点的窗口，超过9点的数据就应该算9点到10点的数据，为什么说他是8点到9点的窗口迟到的数据。这个涉及到**时间语义**的概念, 即不仅仅要看数据处理的时间，而是数据产生的时间。
+
+   ~~~java
+   package com.kyle.api.window;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.FilterFunction;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.streaming.api.datastream.DataStream;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.windowing.assigners.TumblingProcessingTimeWindows;
+   import org.apache.flink.streaming.api.windowing.time.Time;
+   import org.apache.flink.util.OutputTag;
+   import org.apache.logging.log4j.util.Strings;
+   
+   /**
+    * @author kyle on 2021-11-26 8:34 上午
+    */
+   public class WindowTest06_allowLateness {
+   
+   
+      public static void main(String[] args) {
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+   
+         DataStreamSource<String> inputStream = env.socketTextStream("localhost", 9999);
+         SingleOutputStreamOperator<String> filterStream = inputStream.filter(new FilterFunction<String>() {
+            @Override
+            public boolean filter(String value) throws Exception {
+               return Strings.isNotBlank(value);
+            }
+         });
+   
+         env.setParallelism(1);
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = filterStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         OutputTag<SensorReading> tagLate = new OutputTag<SensorReading>("late"){};
+         SingleOutputStreamOperator<SensorReading> sum = mapStream.keyBy("id")
+                 .window(TumblingProcessingTimeWindows.of(Time.seconds(10)))
+                 .allowedLateness(Time.seconds(5))
+                 .sum("temperature");
+   
+      }
+   
+   }
+   
+   ~~~
+
+2. 将窗口期间无法等待到的数据单独输出处理
+
+   > .sideOutputLateData() --- 将迟到的数据放入侧输出流
+   >
+   > .getSideOutput() --- 获取侧输出流
+
+   ~~~java
+   package com.kyle.api.window;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.FilterFunction;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.streaming.api.datastream.DataStream;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.windowing.assigners.TumblingProcessingTimeWindows;
+   import org.apache.flink.streaming.api.windowing.time.Time;
+   import org.apache.flink.util.OutputTag;
+   import org.apache.logging.log4j.util.Strings;
+   
+   /**
+    * @author kyle on 2021-11-26 8:57 上午
+    */
+   public class WindowTest07_lateSideOutput {
+   
+      public static void main(String[] args) {
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+   
+         DataStreamSource<String> inputStream = env.socketTextStream("localhost", 9999);
+         SingleOutputStreamOperator<String> filterStream = inputStream.filter(new FilterFunction<String>() {
+            @Override
+            public boolean filter(String value) throws Exception {
+               return Strings.isNotBlank(value);
+            }
+         });
+   
+         env.setParallelism(1);
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = filterStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         OutputTag<SensorReading> tagLate = new OutputTag<SensorReading>("late"){};
+         SingleOutputStreamOperator<SensorReading> sum = mapStream.keyBy("id")
+                 .window(TumblingProcessingTimeWindows.of(Time.seconds(10)))
+                 .sideOutputLateData(tagLate)
+                 .sum("temperature");
+   
+         DataStream<SensorReading> sideOutput = sum.getSideOutput(tagLate);
+   
+      }
+   
+   }
+   
+   ~~~
+
+   
+
+### 5.3.4 .trigger() 定义window关闭时机
+
+> 定义window什么时候关闭，触发计算并输出结果
+
+### 5.3.5 .evictor()  移除器
+
+> 定义移除某些数据的逻辑
+
+### 5.3.6 窗口函数总结
+
+> **出走半生最终仍是dataStream**
+
+1. 数据流 keyBy
+
+   > - dataStream 经过 keyBy 后 得到 keyedStream
+   > - keyedStream 经过 开窗操作 得到一个windowStream
+   > - windowStream 经过聚合操作  得到一个 dataStream
+
+2. 数据流2 不经过keyBy直接windowAll
+
+   > - dataStream 直接 windowAll 得到 allWindowStream
+   > - allWindowStream 经过 apply 等方法 得到 dataStream
+
+
+
+## 6 时间语义和Watermark
+
+## 6.1 时间（Time）语义
+
+> - Event Time：事件创建的时间
+> - Ingestion Time：数据进入Flink的时间
+> - Processing Time：执行操作算子的本地系统时间，与机器相关
+>
+> <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gwsa8rhe0dj30v40dkmy9.jpg" alt="flink_parallelism_01" style="zoom:70%;" />
+
+## 6.2 
+
+>
+
+### 6.2.1 哪种语义更重要
+
+1. 不同的时间语义在不同的场景下侧重点不同
+
+   以电影【星球大战】为例，
+
+   - 1977年 第一部 星球大战4-新希望
+   - 1980年 第二部 星球大战5-帝国反击战
+   - 1983年 第三部 星球大战6-绝地归来
+   - 1999年 第四部 星球大战1-幽灵的威胁
+   - 2002年 第五部 星球大战2-克隆人的进攻
+   - 2005年 第六部 星球大战3-西斯的复仇
+   - 2015年 第七部 星球大战7-原力觉醒
+
+   拍电影的时间就相当于我们说的处理时间
+
+   星球大战电影本身的1，2，3，4，5，6，7系列就是我们说的事件时间。
+
+   如果对电影本身的故事感兴趣，就应该关注电影本身系列的时间线
+
+   如果是观众或者关注票房的就更关注电影拍摄时间，什么时候拍摄上映什么时候看。
+
+   <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gwuopice1fj30uc0dst9i.jpg" alt="flink_parallelism_01" style="zoom:70%;" />
+
+2. 在Flink 1.12， setStreamTimeCharacteristic已经被标记为过期
+
+
+
+
+
+## 6.3 watermark 水印
+
+### 6.3.1 怎样避免乱序数据带来的计算不正确
+
+
+
+### 6.3.2 watermark的作用
+
+1. Watermark是一种衡量Event Time进展的机制，可以设定延迟触发
+
+2. Watermark用于处理乱序事件的，而正确的处理乱序事件，通常是使用Watermark的机制结合window来实现
+
+3. 数据流中的Watermark用于表现timestamp小于Watermark的数据，都已经到达了，因此，window的执行也是由Watermark触发的。
+
+   >**学生秋游等车例子**
+   >
+   >1、约定早上9点出发
+   >
+   >2、实际上大部分同学会在9点01分到达，那使用watermark的机制将时间延迟1分钟，即实际9.01分发车，（输出第一个结果）
+   >
+   >3、还有小部分同学9.01分还没到，要9.10分前才到，那就使用window的allowedLateness，即9.01分发车了， 但慢慢开车，如果9.10分前那小部分同学通过各种方式追赶上巴士，也可以开门上车，这时候没来一个就更新一次输出。
+   >
+   >4、最后还有极少部分9.10分都还没来，那么就不等了，关上车门直接上高速出发
+   >
+   >5、这极少部分的同学就通过另外的交通方式到达目的地，相当于使用window的sideOutputLateData。
+
+4. watermark用来让程序自己平衡延迟和结果正确性。 （权衡）
+
+   > - 如果希望程序延迟更低更快一些，就把watermark设置小一些，这样等待乱序事件的时间就短一些，正确性相对差一些
+   > - 如果希望程序的准确性更高一些，就把watermark设置大一些，这样等待乱序事件的时间就长一些，延迟会相对高一些
+
+5. watermark的特点
+
+   ><img src="https://tva1.sinaimg.cn/large/008i3skNgy1gwwux3hgldj30v80ast9a.jpg" alt="flink_parallelism_01" style="zoom:80%;" />
+   >
+   >记录1来到后，可以插入时间戳为2的watermark
+   >
+   >当记录5和3来到后，可以认为事件时间已经到了时间戳5的时间，所以3是延迟数据了，这时候不能插入3的时间戳watermark，要插入5的时间戳的watermark
+
+   - watermark是一条特殊的数据记录
+   - watermark必需单调递增，以确保任务的事件时间始终在向前推进，而不是在后退
+   - watermark与数据的时间戳相关
+
+### 6.3.3 watermark的画图理解
+
+1. 当Flink以Event Time模式处理数据流时，它会根据数据里的时间戳来处理基于时间的算子
+
+2. 由于网络，分布式等原因，会导致乱序数据的产生，就事件的产生顺序和实际到来的顺序不一致。
+
+3. 乱序数据会让窗口计算不准确，所以要考虑乱序数据的处理。一般是通过window+watermark结合处理。
+
+4. 如下图时间线：
+
+   > 设置watermark延迟时间为3秒
+
+   1. 第1条数据分配到[0,5)窗口，因为watermark=1-3=-2，[0,5)窗口不关闭
+   2. 第2条数据分配到[0,5)窗口，因为watermark=4-3=1，[0,5)窗口不关闭
+   3. 第3条数据分配到[5,10)窗口，因为watermark=5-3=2，[5,10)窗口不关闭
+   4. 第4条数据分配到[0,5)窗口，因为watermark=(2-3=-1)<2，取2，[0,5)窗口不关闭
+   5. 第5条数据分配到[0,5)窗口，因为watermark=(3-3=0)<2，取2，[0,5)窗口不关闭
+   6. 第6条数据分配到[5,10)窗口，因为watermark=6-3=3，[5,10)窗口不关闭
+   7. 第7条数据分配到[5,10)窗口，因为watermark=7-3=4，[5,10)窗口不关闭
+   8. 第8条数据分配到[5,10)窗口，因为watermark=5-3=2，[5,10)窗口不关闭
+   9. **第9条数据分配到[5,10)窗口，因为watermark=8-3=5，[0,5)窗口关闭**
+   10. 第10条数据迟到数据，本应分配[0,5)但无法分配，因为watermark=(4-3=1)<5，取5，[0,5)窗口已关闭
+   11. 第11条数据分配到[5,10)窗口，因为watermark=11-3=8，[5,10)窗口不关闭
+   12. 第12条数据分配到[5,10)窗口，因为watermark=12-3=9，[5,10)窗口不关闭
+
+<img src="https://tva1.sinaimg.cn/large/008i3skNgy1gwy06lx859j31c50u078g.jpg" alt="flink_parallelism_01" style="zoom:50%;" />
+
+
+
+### 6.3.4 watermark的传递
+
+>watermark的传递就是需要上游的任务将watermark广播给下游的任务，Flink的流中有多个子任务，每个子任务的处理速度不一样，下游子任务可能会接收到来自上游不同子任务不同的watermark时间戳，那么以哪个为准呢。
+>
+>依据 watermark的本质：事件时间进展到现在这个时间点，之前的数据都到齐了。
+
+1. 取最小的partition watermark作为当前任务的事件时钟
+
+   一个任务有4个并行的上游任务， 3个并行的下游任务，对于上游的4个任务，每个任务都会分配一个空间保存当前这个分区的watermark(partition watermark)，那么当前这个任务就是以最小的那个partition watermark作为自己的watermark，并且广播到下游任务。
+
+<img src="https://tva1.sinaimg.cn/large/008i3skNgy1gwy1ifftmrj30ss0i8q4d.jpg" alt="flink_parallelism_01" style="zoom:80%;" />
 
 
 
@@ -1744,41 +2446,7 @@ public class PartitionTest_01 {
 
 
 
-
-
-- 相关参数：
-
-  taskmanager.memory.process.size
-
-| Flink Memory Model |      | taskmanager.memory.process.size(M) |         |
-| ------------------ | ---- | ---------------------------------- | ------- |
-|                    |      | 2048m                              | 4096m   |
-| Framework Heap     |      | 128                                | 128     |
-| Task Heap          |      | 538                                | 1454.08 |
-| Managed Memory     |      | 635                                | 1372.16 |
-| Framework Off-Heap |      | 128                                | 128     |
-| Task Off-Heap      |      | 0                                  | 0       |
-| Network            |      | 159                                | 343     |
-| JVM Metaspace      |      | 256                                | 256     |
-| JVM Overhead       |      | 205                                | 410     |
-
-
-
-
-
-## 3.4 思考
-
-- 怎样实现并行计算（019）
-
-  答：多线程，不同的任务分配到不同的线程上。不同的slot其实就是执行不同的任务。
-
-- 并行任务，需要占用多少slot（019）
-
-  答：跟当前任务设置并行度最大值有关
-
-- 一个流处理程序，到底包含多少个任务（019）
-
-  答：
+​	
 
 
 
