@@ -2432,6 +2432,245 @@ public class PartitionTest_01 {
 
 
 
+### 6.3.5 watermark的代码测试理解
+
+1. 基于事件时间的开窗聚合：统计15秒内温度最小值
+
+   ~~~java
+   package com.kyle.api.watermark;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+   import org.apache.flink.api.common.functions.FilterFunction;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.streaming.api.TimeCharacteristic;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor;
+   import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
+   import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+   import org.apache.flink.streaming.api.windowing.time.Time;
+   import org.apache.logging.log4j.util.Strings;
+   
+   import java.time.Duration;
+   
+   /**
+    * @author kyle on 2021-12-01 8:48 上午
+    */
+   public class WatermarkTest01_EventTime {
+   
+      public static void main(String[] args) throws Exception {
+   
+   
+          StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+   
+          DataStreamSource<String> inputStream = env.socketTextStream("localhost", 9999);
+          SingleOutputStreamOperator<String> filterStream = inputStream.filter(new FilterFunction<String>() {
+              @Override
+              public boolean filter(String value) throws Exception {
+                  return Strings.isNotBlank(value);
+              }
+          });
+   
+          env.setParallelism(1);
+          env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+          env.getConfig().setAutoWatermarkInterval(100L);
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = inputStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         })
+                 // 明确升序数据设置时间戳和watermark
+   //              .assignTimestampsAndWatermarks(new AscendingTimestampExtractor<SensorReading>() {
+   //                 @Override
+   //                 public long extractAscendingTimestamp(SensorReading element) {
+   //                    return element.getTimestamp() * 1000L;
+   //                 }
+   //              })
+   
+                 // 1.12 版本
+   //              .assignTimestampsAndWatermarks(WatermarkStrategy.forBoundedOutOfOrderness(Duration.ofSeconds(5)))
+   
+                 // 乱序数据设置时间戳和watermark
+                 .assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor<SensorReading>(Time.seconds(2)) {
+                     @Override
+                     public long extractTimestamp(SensorReading element) {
+                        return element.getTimestamp() * 1000L;
+                     }
+                  });
+   
+           // 基于事件时间的开窗聚合： 统计15秒内温度的最小值
+          SingleOutputStreamOperator<SensorReading> minTempStream = mapStream.keyBy("id")
+                  .window(TumblingEventTimeWindows.of(Time.seconds(15)))
+                  .minBy("temperature");
+   
+          minTempStream.print();
+          env.execute();
+      }
+   }
+   ~~~
+
+   <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gwz76e8kbsj30qd0ffdj5.jpg" alt="flink_parallelism_01" style="zoom:80%;" />
+
+   <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gwz77d8hwij31ho0regqi.jpg" alt="flink_parallelism_01" style="zoom:50%;" />
+
+   ~~~python
+   sensor_01 1547718199 35.8
+   sensor_02 1547718201 15.4
+   sensor_03 1547718202 6.7
+   sensor_04 1547718205 38.1
+   sensor_04 1547718206 38.2
+   sensor_04 1547718207 38.3
+   sensor_04 1547718208 38.4
+   sensor_04 1547718209 38.5
+   sensor_04 1547718210 38.6
+   sensor_04 1547718211 38.7
+   sensor_04 1547718212 38.8
+   
+   # 212触发窗口计算，同时watermark设置时间是2秒，窗口长度是15
+   # 所以关闭的窗口是[195, 210）  ？？？  为什么窗口是[195, 210), 不是[192, 207).... 解释在6.3.6
+   # 下一个窗口是[210, 225） 事件时间戳到达227才触发
+   # 下下一个窗口是[225, 240)  事件时间戳到达242才会触发
+   
+   sensor_04 1547718213 39.0
+   sensor_04 1547718214 39.1
+   sensor_04 1547718215 39.2
+   sensor_04 1547718216 39.3
+   sensor_04 1547718217 39.4
+   sensor_04 1547718218 39.5
+   sensor_04 1547718219 39.6
+   sensor_04 1547718220 39.7
+   sensor_04 1547718221 39.8
+   sensor_04 1547718222 39.9
+   sensor_04 1547718223 39.10
+   sensor_04 1547718224 40.0
+   sensor_04 1547718225 40.1
+   sensor_04 1547718226 40.2
+   sensor_04 1547718227 40.3
+   
+   # 227 触发了[210,225)窗口的关闭计算，
+   # 在[210,225)窗口中温度最低的是 210，所以输出的结果也就是210的温度
+   
+   sensor_04 1547718228 40.4
+   sensor_04 1547718229 40.5
+   sensor_04 1547718230 40.6
+   sensor_04 1547718231 40.7
+   sensor_04 1547718239 30.0
+   sensor_04 1547718240 23.5
+   sensor_04 1547718241 20.1
+   sensor_04 1547718242 22.2
+   
+   # 242 触发了[225, 240)窗口的关闭计算，
+   # 同时发现240， 241， 242 的温度更低，但是这个窗口输出的是239的温度， 
+   # 因为这个窗口是[225, 240), 不包含240，241，242，在这个窗口中239的温度是最低的
+   
+   
+   ~~~
+
+   
+
+### 6.3.6 窗口的起始点和偏移量
+
+> 在6.3.5的测试中有个疑问，第一个时间窗口是[195, 210), 这个时间窗口是怎么确定的?
+
+1. 源码
+
+   ~~~java
+   @Override
+       public Collection<TimeWindow> assignWindows(
+               Object element, long timestamp, WindowAssignerContext context) {
+           if (timestamp > Long.MIN_VALUE) {
+               if (staggerOffset == null) {
+                   staggerOffset =
+                           windowStagger.getStaggerOffset(context.getCurrentProcessingTime(), size);
+               }
+               // Long.MIN_VALUE is currently assigned when no timestamp is present
+               long start =
+                       TimeWindow.getWindowStartWithOffset(
+                               timestamp, (globalOffset + staggerOffset) % size, size);
+               return Collections.singletonList(new TimeWindow(start, start + size));
+           } else {
+               throw new RuntimeException(
+                       "Record has Long.MIN_VALUE timestamp (= no timestamp marker). "
+                               + "Is the time characteristic set to 'ProcessingTime', or did you forget to call "
+                               + "'DataStream.assignTimestampsAndWatermarks(...)'?");
+           }
+       }
+   ~~~
+
+   ~~~java
+   public static long getWindowStartWithOffset(long timestamp, long offset, long windowSize) {
+           return timestamp - (timestamp - offset + windowSize) % windowSize;
+       }
+   ~~~
+
+2. 解释
+
+   在测试代码中，我们调用的是 事件时间语义下的滚动窗口【TumblingEventTimeWindows】,在 【TumblingEventTimeWindows】里面可以看到有【assignWindows】这个方法调用了一个最终计算起始点和偏移量的方法【getWindowStartWithOffset】，所以可以看到最终计算起始点和偏移量的公式就是：
+
+   > timestamp - (timestamp - offset + windowSize) % windowSize;
+
+   - 忽略offset
+
+     假设我们先不考虑偏移量offset，timestamp是我们获取到的数据里面的时间戳，那么公式相当于：
+
+     1. 先用timestamp加上我们设置的时间窗口长度，再对时间窗口长度取模，这个运算得到的时间戳对窗口长度的余数
+
+     2. 用时间戳减去这个余数，得到的是我们设置窗口长度的整倍数，这个整倍数就用我们窗口的起始点
+
+     3. eg.测试代码中第一个触发第一个窗口时的时间戳是1547718212，同时我们设置的watermark是2， 可以推算出这个窗口结束点是1547718212， 然后拿这个窗口中随意一条记录的时间戳按照公式计算如:
+
+        >  1547718201 - (1547718201 + 15)%15 = 1547718201- 6 = 1547718195,
+
+        即时间窗口是第一个时间窗口是[1547718195, 1547718210),因为是滚动窗口，第一个窗口确定了，后续所有窗口也固定了。
+
+     4. 从上述看出，最后算出来一定是 从0开始， 0到15， 15到30， 一点点推移过来的， 按照这个规则， 得到的起始点和结束点一定是15的整倍数。**这个公式其实就是计算当前这条数据数据哪个窗口。**
+
+   - 设置偏移量offset 
+
+     > 用于一些特殊的场景，如不同时区时处理数据的要求.
+     >
+     > 比如我们想开1天的窗口处理数据，因为我们习惯使用北京时间UTC+08:00，而flink默认是UTC+00:00时间，如果我们不设置偏移量的话，每天开窗拿到的时间区间都会是我们的早8点到晚8点，就不是我们所认知的0点到0点的一天数据，
+     >
+     > 源码注释建议:
+     >
+     > ~~~java
+     > /**Rather than that,if you are living in somewhere which is not using UTC±00:00 time,
+     > 	 * such as China which is using UTC+08:00,and you want a time window with size of one day,
+     > 	 * and window begins at every 00:00:00 of local time,you may use {@code of(Time.days(1),Time.hours(-8))}.
+     > 	 * The parameter of offset is {@code Time.hours(-8))} since UTC+08:00 is 8 hours earlier than UTC time.
+     > ~~~
+     >
+     > 
+
+     1. 从上面忽略offset的计算看出，我们把offset加上去后得到的结果就不是从0开始的时间窗口，而是我们设置偏移量开始的时间窗口。
+
+     2. 如设置偏移量为5，窗口的起始点计算如：
+
+        > 1547718199 - (1547718199 - 5 + 15)%15 = 1547718199 - 14 = 1547718185
+        >
+        > 1547718201 - (1547718201 - 5 + 15)%15 = 1547718201- 1 = 1547718200
+
+        因为窗口是左闭右开，可以看出 
+
+        1547718199 这条记录应该是数据[1547718185, 1547718200)这个窗口
+
+        1547718201 这条记录应该是数据[1547718200, 1547718215)这个窗口
+
+        > 下图中可以看到虽然已经输入到达了3条记录，但是第一个窗口只输出了一条记录，因为这个窗口是[185, 200),前三条记录中的后两条的时间戳都大于200，不属于这个窗口，就不进行输出计算了。
+
+        <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gx0d8u98o3j30f8060gmr.jpg" alt="flink_parallelism_01" style="zoom:100%;" />
+
+        <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gx0dar3ypvj31fg0h8gpr.jpg" alt="flink_parallelism_01" style="zoom:50%;" />
+
+
+
+
+
 
 
 
