@@ -2657,11 +2657,11 @@ public class PartitionTest_01 {
 
         因为窗口是左闭右开，可以看出 
 
-        1547718199 这条记录应该是数据[1547718185, 1547718200)这个窗口
+        - 1547718199 这条记录应该是数据[1547718185, 1547718200)这个窗口
 
-        1547718201 这条记录应该是数据[1547718200, 1547718215)这个窗口
+        - 1547718201 这条记录应该是数据[1547718200, 1547718215)这个窗口
 
-        > 下图中可以看到虽然已经输入到达了3条记录，但是第一个窗口只输出了一条记录，因为这个窗口是[185, 200),前三条记录中的后两条的时间戳都大于200，不属于这个窗口，就不进行输出计算了。
+        下图中可以看到虽然已经输入到达了3条记录，但是第一个窗口只输出了一条记录，因为这个窗口是[185, 200),前三条记录中的后两条的时间戳都大于200，不属于这个窗口，就不进行输出计算了。
 
         <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gx0d8u98o3j30f8060gmr.jpg" alt="flink_parallelism_01" style="zoom:100%;" />
 
@@ -2670,6 +2670,133 @@ public class PartitionTest_01 {
 
 
 
+
+
+
+### 6.3.7 事件时间语义下的窗口测试 - 迟到数据处理
+
+> watermark hold不住的那些超过 watermark时间的迟到数据，就需要通过window的迟到数据处理结合。
+
+1. 代码
+
+   ~~~java
+   package com.kyle.api.watermark;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.FilterFunction;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.streaming.api.TimeCharacteristic;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
+   import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+   import org.apache.flink.streaming.api.windowing.time.Time;
+   import org.apache.flink.util.OutputTag;
+   import org.apache.logging.log4j.util.Strings;
+   
+   /**
+    * @author kyle on 2021-12-01 8:48 上午
+    */
+   public class WatermarkTest01_EventTime_Late {
+   
+      public static void main(String[] args) throws Exception {
+   
+   
+          StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+   
+          DataStreamSource<String> inputStream = env.socketTextStream("localhost", 9999);
+          SingleOutputStreamOperator<String> filterStream = inputStream.filter(new FilterFunction<String>() {
+              @Override
+              public boolean filter(String value) throws Exception {
+                  return Strings.isNotBlank(value);
+              }
+          });
+   
+          env.setParallelism(1);
+          env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+          env.getConfig().setAutoWatermarkInterval(100L);
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = inputStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         })
+                 // 乱序数据设置时间戳和watermark
+                 .assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor<SensorReading>(Time.seconds(2)) {
+                     @Override
+                     public long extractTimestamp(SensorReading element) {
+                        return element.getTimestamp() * 1000L;
+                     }
+                  });
+   
+          OutputTag<SensorReading> outputTag = new OutputTag<SensorReading>("late") {};
+   
+          // 基于事件时间的开窗聚合： 统计15秒内温度的最小值
+          SingleOutputStreamOperator<SensorReading> minTempStream = mapStream.keyBy("id")
+                  .window(TumblingEventTimeWindows.of(Time.seconds(15)))
+                  .allowedLateness(Time.minutes(1))
+                  .sideOutputLateData(outputTag)
+                  .minBy("temperature");
+   
+          minTempStream.print("minTemp");
+          minTempStream.getSideOutput(outputTag).print("late");
+   
+          env.execute();
+   
+      }
+   
+   
+   }
+   
+   
+   ~~~
+
+2. 测试解释
+
+   - 测试数据
+
+     ~~~
+     迟到数据测试
+     sensor_01 1547718199 35.8
+     sensor_01 1547718206 36.8
+     sensor_01 1547718210 34.7
+     sensor_01 1547718211 31
+     sensor_01 1547718209 34.9
+     sensor_01 1547718212 37.1
+     sensor_01 1547718213 33
+     sensor_01 1547718206 34.2
+     sensor_01 1547718202 36
+     sensor_01 1547718270 31
+     sensor_01 1547718203 31.9
+     sensor_01 1547718272 34
+     sensor_01 1547718203 30.6
+     sensor_01 1547718203 40
+     sensor_01 1547718205 41
+     sensor_01 1547718212 41
+     ~~~
+
+   - 测试过程解释
+
+     <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gx4xzqrxp6j311n0u0afy.jpg" alt="flink_parallelism_01" style="zoom:50%;" />
+
+     <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gx4xfmce55j314j0u048f.jpg" alt="flink_parallelism_01" style="zoom:50%;" />
+
+     
+
+     1. 212：【输出】达到[195, 210)窗口的watermark设定的延迟2秒， 输出**第1条**记录
+     2. 213：【不输出】属于[210, 225)， 但该窗口未触发计算
+     3. 206：【输出】属于[195, 210)的记录，因为设置了【**.allowedLateness(Time.minutes(1))**】，[195, 210)窗口未关闭，输出**第2条**记录，该窗口最低温度是206的34.2°
+     4. 202：【输出】属于[195, 210)的记录，[195, 210)窗口未关闭，输出**第3条**记录，该窗口最低温度是206的34.2°
+     5. 270：【输出】 超过227，[210, 225)窗口触发计算，输出**第4条**记录，该低温度记录211的31°
+     6. 203：【输出】属于[195, 210)的记录，[195, 210)窗口未关闭，输出**第5条**记录，该窗口最低温度是203的31.9°
+     7. 272：【不输出】达到[195, 210)窗口1分钟延迟的时间，[195, 210窗口在此时关闭，后续[195, 210)的数据会进入指定的侧输出流。
+     8. 203：【输出】属于[195, 210)的记录，但[195, 210)窗口已关闭，不再和之前窗口共同计算最低值，直接输出**第6条**记录
+     9. 203：【输出】属于[195, 210)的记录，但[195, 210)窗口已关闭，不再和之前窗口共同计算最低值，直接输出**第7条**记录
+     10. 205：【输出】属于[195, 210)的记录，但[195, 210)窗口已关闭，不再和之前窗口共同计算最低值，直接输出**第8条**记录
+     11. 212：【输出】属于[210, 225)的记录，[210, 225)窗口未关闭，输出第9条记录，该窗口最低温度是211的31.0°
 
 
 
