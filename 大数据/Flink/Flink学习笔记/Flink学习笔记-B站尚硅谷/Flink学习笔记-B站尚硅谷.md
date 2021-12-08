@@ -2312,11 +2312,11 @@ public class PartitionTest_01 {
 >
 > <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gwsa8rhe0dj30v40dkmy9.jpg" alt="flink_parallelism_01" style="zoom:70%;" />
 
-## 6.2 
+## 6.2 时间语义的场景
 
->
+>我们需要根据具体场景需要来采用不同的时间语义
 
-### 6.2.1 哪种语义更重要
+### 6.2.1 哪种时间语义更重要
 
 1. 不同的时间语义在不同的场景下侧重点不同
 
@@ -2786,9 +2786,9 @@ public class PartitionTest_01 {
 
      
 
-     1. 212：【输出】达到[195, 210)窗口的watermark设定的延迟2秒， 输出**第1条**记录
+     1. 212：【输出】达到[195, 210)窗口的watermark设定的延迟2秒， 输出**第1条**记录， 因为设置了**【.allowedLateness(Time.minutes(1))】**，[195, 210)窗口不会在此时关闭，会在此时基础上延迟1分钟，即272时刻才会关闭。在后续1分钟内，只要该窗口内来的每一条数据都会触发一次计算更新输出。
      2. 213：【不输出】属于[210, 225)， 但该窗口未触发计算
-     3. 206：【输出】属于[195, 210)的记录，因为设置了**【.allowedLateness(Time.minutes(1))】**，[195, 210)窗口未关闭，输出**第2条**记录，该窗口最低温度是206的34.2°
+     3. 206：【输出】属于[195, 210)的记录，[195, 210)窗口未关闭，输出**第2条**记录，该窗口最低温度是206的34.2°
      4. 202：【输出】属于[195, 210)的记录，[195, 210)窗口未关闭，输出**第3条**记录，该窗口最低温度是206的34.2°
      5. 270：【输出】 超过227，[210, 225)窗口触发计算，输出**第4条**记录，该低温度记录211的31°
      6. 203：【输出】属于[195, 210)的记录，[195, 210)窗口未关闭，输出**第5条**记录，该窗口最低温度是203的31.9°
@@ -2797,6 +2797,158 @@ public class PartitionTest_01 {
      9. 203：【输出】属于[195, 210)的记录，但[195, 210)窗口已关闭，不再和之前窗口共同计算最低值，直接输出**第7条**记录
      10. 205：【输出】属于[195, 210)的记录，但[195, 210)窗口已关闭，不再和之前窗口共同计算最低值，直接输出**第8条**记录
      11. 212：【输出】属于[210, 225)的记录，[210, 225)窗口未关闭，输出第9条记录，该窗口最低温度是211的31.0°
+
+
+
+## 7、状态管理
+
+### 7.1、状态后端 State Backend
+
+### 7.1.1 什么是 状态后端
+
+1. 每传入一条数据，有状态的算子任务都会读取和更新状态
+2. 由于有效的状态访问对于处理数据的低延迟很重要，因此每个并行任务都会在本地维护状态，以确保快速的状态访问
+3. 状态的存储，访问以及维护，由一个可插入的组件决定，这个组件就叫做**状态后端**
+4. **状态后端**主要负责两件事，本地的状态管理，以及将检查点（checkpoint）状态写入远程存储
+
+### 7.1.2 状态后端的分类
+
+1. **MemoryStateBackend**
+   - 内存级别的状态后端，会将监控状态作为内存中的对象进行管理，将它们存在TaskManager的JVM堆上，而将checkpoint存储在JobManager的内存中
+   - 特点：快速，低延迟， 但不稳定可靠，生产环境一般不适用，适用于测试场景
+2. **FsStateBackend**
+   - 将checkpoint存储到远程的持久化文件系统上（FilsSystem），而对于本地状态，跟MemoryStateBackend一样，也会存在TaskManager的JVM堆上
+   - 特点：同时拥有内存级别的本地访问速度，和远程文件系统故障恢复的容错保证。
+3. **RockDBStateBackend**
+   - RockDB是facebook研发的类似no sql的数据库
+   - 将所有状态序列化后，存入本地的TocksDB中。
+   - 解决状态信息特别大或者随着时间不断增长的情况，因为在状态信息特别大的时候，前面两种状态后端把状态信息保存在TaskManager的JVM中，会导致OOM，就使用RockDBStateBackend。
+
+### 7.1.3 集群中的 状态后端配置
+
+1. flink-conf.yaml
+
+   > 默认就是 【filesystem】
+   >
+   > state.backend.incremental 默认是false， rockdb支持 增量化checkpoints
+   >
+   > jobmanager.execution.failover-strategy：默认region， 1.9新引入的特性，区域化重启，flink会解析出所有任务的关系，当某个任务挂了，区域化重启就可以只重启有关系的任务，不需要所有任务重启
+
+   ~~~yaml
+   #==============================================================================
+   # Fault tolerance and checkpointing
+   #==============================================================================
+   
+   # The backend that will be used to store operator state checkpoints if
+   # checkpointing is enabled. Checkpointing is enabled when execution.checkpointing.interval > 0.
+   #
+   # Execution checkpointing related parameters. Please refer to CheckpointConfig and ExecutionCheckpointingOptions for more details.
+   #
+   # execution.checkpointing.interval: 3min
+   # execution.checkpointing.externalized-checkpoint-retention: [DELETE_ON_CANCELLATION, RETAIN_ON_CANCELLATION]
+   # execution.checkpointing.max-concurrent-checkpoints: 1
+   # execution.checkpointing.min-pause: 0
+   # execution.checkpointing.mode: [EXACTLY_ONCE, AT_LEAST_ONCE]
+   # execution.checkpointing.timeout: 10min
+   # execution.checkpointing.tolerable-failed-checkpoints: 0
+   # execution.checkpointing.unaligned: false
+   #
+   # Supported backends are 'jobmanager', 'filesystem', 'rocksdb', or the
+   # <class-name-of-factory>.
+   #
+   # state.backend: filesystem
+   
+   # Directory for checkpoints filesystem, when using any of the default bundled
+   # state backends.
+   #
+   # state.checkpoints.dir: hdfs://namenode-host:port/flink-checkpoints
+   
+   # Default target directory for savepoints, optional.
+   #
+   # state.savepoints.dir: hdfs://namenode-host:port/flink-savepoints
+   
+   # Flag to enable/disable incremental checkpoints for backends that
+   # support incremental checkpoints (like the RocksDB state backend). 
+   #
+   # state.backend.incremental: false
+   
+   # The failover strategy, i.e., how the job computation recovers from task failures.
+   # Only restart tasks that may have been affected by the task failure, which typically includes
+   # downstream tasks and potentially upstream tasks if their produced data is no longer available for consumption.
+   
+   jobmanager.execution.failover-strategy: region
+   ~~~
+
+### 7.1.4 代码中 状态后端的设置
+
+1. env设置
+
+   > RocksDB需要引入jar包
+   >
+   > ```xml
+   > <dependency> 
+   >     <groupId>org.apache.flink</groupId>
+   >     <artifactId>flink-statebackend-rocksdb_${scala.binary.version}</artifactId>
+   >     <version>${flink.version}</version>
+   > </dependency>
+   > ```
+
+   ~~~java
+   package com.kyle.api.StateBackend;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.contrib.streaming.state.RocksDBStateBackend;
+   import org.apache.flink.runtime.state.filesystem.FsStateBackend;
+   import org.apache.flink.runtime.state.memory.MemoryStateBackend;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   
+   /**
+    * @author kyle on 2021-12-08 7:50 上午
+    */
+   public class StateTest01_StateBackend {
+   
+      public static void main(String[] args) throws Exception {
+   
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+         DataStreamSource<String> dataStream = env.readTextFile("/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor.txt");
+   
+         env.setParallelism(1);
+   
+   
+         // 设置状态后端
+         env.setStateBackend(new MemoryStateBackend());
+         env.setStateBackend(new FsStateBackend(""));
+         env.setStateBackend(new RocksDBStateBackend(""));
+   
+   
+         SingleOutputStreamOperator<SensorReading> mapStream = dataStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         mapStream.print();
+   
+         env.execute();
+   
+      }
+   
+   }
+   
+   ~~~
+
+   
+
+## 8、ProcessFunction API （底层API）
+
+
+
+
 
 
 
