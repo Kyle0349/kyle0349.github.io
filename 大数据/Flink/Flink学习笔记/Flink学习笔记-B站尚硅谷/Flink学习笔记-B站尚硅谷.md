@@ -2800,7 +2800,7 @@ public class PartitionTest_01 {
 
 
 
-## 7、状态管理
+## 7 状态管理
 
 ### 7.1、状态后端 State Backend
 
@@ -2944,7 +2944,419 @@ public class PartitionTest_01 {
 
    
 
-## 8、ProcessFunction API （底层API）
+## 8 ProcessFunction API （底层API）
+
+### 8.1 简述和分类
+
+### 8.1.1 简述
+
+1. **转换算子**是无法访问时间的时间戳信息和水位线信息的，如MapFunction这样的map转换算子无法访问时间戳或者当前事件的事件时间，而这类信息在某些场景下极为重要。
+2. 基于此，**DataStream API** 提供了一系列Low-Level转换算子。可以**访问时间戳，watermark以及注册定时事件**。还可以输出特定的一些事件，如超时事件等。
+3. Process Function用来构建事件驱动的应用以及实现自定义的业务逻辑（使用之前的window函数和算子无法实现）。例如Flink SQL就是使用Process Function实现的。
+
+### 8.1.2 Porcess Function 的分类
+
+1. ProcessFunction
+
+2. KeyedProcessFunction
+
+3. CoProcessFunction
+
+   - 合流
+
+4. ProcessJoinFunction
+
+5. BroadcastProcessFunction
+
+   - 广播流
+
+6. KeyedBroadcastProcessFunction
+
+7. ProcessWindowFunction
+
+8. ProcessAllWindowFunction
+
+   
+
+## 8.2 KeyedProcessFunction
+
+### 8.2.1 简述
+
+1. KeyedProcessFunction 用来操作KeyedStream。KeyedProcessFunction会处理流的每一个元素，输出为0个，1个或者多个元素。
+
+2. 所有的Process Function都继承自RichFunction接口，所以都有 open(), close()和getRuntimeContext()等方法
+
+3. KeyedProcessFunction<K, I, O>还额外提供了两个方法：
+   1. processElement(I value, Context ctx, Collector<O> out)，流中的每一个元素都会调用这个方法，调用结果将会放在Collector数据类型中输出。Context可以访问元素的时间戳，元素的key，以及TimerService时间服务。Context还可以将结果输出到别的流(side outputs)
+   2. onTimer(long timestamp, OnTimerContext ctx, Collector<O> out)是一个回调函数。当之前注册的定时器触发时调用。参数timestamp为定时器所设定的触发的时间戳。Collector为输出结果集合。OnTimerContext和processElement的Context参数一样，提供了上下文的信息，例如定时器触发的时间信息（事件时间或者处理时间）。
+   
+### 8.2.2 代码
+1. demo代码
+
+   ~~~java
+   package com.kyle.api.processFunction;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.FilterFunction;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.api.common.state.ValueState;
+   import org.apache.flink.api.common.state.ValueStateDescriptor;
+   import org.apache.flink.api.java.tuple.Tuple;
+   import org.apache.flink.configuration.Configuration;
+   import org.apache.flink.contrib.streaming.state.RocksDBStateBackend;
+   import org.apache.flink.runtime.state.filesystem.FsStateBackend;
+   import org.apache.flink.runtime.state.memory.MemoryStateBackend;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+   import org.apache.flink.util.Collector;
+   import org.apache.logging.log4j.util.Strings;
+   
+   /**
+    * @author kyle on 2021-12-08 8:35 上午
+    */
+   public class PorcessTuncTest01_Keyed {
+   
+      public static void main(String[] args) throws Exception {
+   
+   
+         // socket 文本流
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+   
+         DataStreamSource<String> inputStream = env.socketTextStream("localhost", 9999);
+         SingleOutputStreamOperator<String> filterStream = inputStream.filter(new FilterFunction<String>() {
+            @Override
+            public boolean filter(String value) throws Exception {
+               return Strings.isNotBlank(value);
+            }
+         });
+   
+         env.setParallelism(1);
+   
+         // 转换成 SensorReading 类型
+         SingleOutputStreamOperator<SensorReading> mapStream = filterStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+         // 测试 KeyedProcessFunction， 先分组然后自定义处理
+         mapStream.keyBy("id")
+                 .process(new MyProcess())
+                 .print();
+         env.execute();
+   
+      }
+   
+   
+      // 实现自定义的处理函数
+      public static class MyProcess extends KeyedProcessFunction<Tuple, SensorReading, Integer>{
+         ValueState<Long> tsTimerState;
+   
+         @Override
+         public void open(Configuration parameters) throws Exception {
+            tsTimerState = getRuntimeContext().getState(new ValueStateDescriptor<Long>("ts-timer", Long.class));
+         }
+   
+         @Override
+         public void processElement(SensorReading value, Context ctx, Collector<Integer> out) throws Exception {
+            out.collect(value.getId().length());
+   
+            // context
+            ctx.timestamp();
+            ctx.getCurrentKey();
+            // 侧输出流输出
+   //         ctx.output();
+            ctx.timerService().currentProcessingTime();
+            ctx.timerService().currentWatermark();
+            // 设定定时器： 注意， 参数时间是绝对时间戳 , 当前时间延迟10秒
+   //         ctx.timerService().registerEventTimeTimer((value.getTimestamp() + 10) * 1000);
+            ctx.timerService().registerProcessingTimeTimer(ctx.timerService().currentProcessingTime() + 5000L);
+            tsTimerState.update(ctx.timerService().currentProcessingTime() + 5000L);
+   
+            // 取消定时器
+   //         ctx.timerService().deleteEventTimeTimer(tsTimerState.value());
+   
+         }
+   
+         @Override
+         public void onTimer(long timestamp, OnTimerContext ctx, Collector<Integer> out) throws Exception {
+            System.out.println(timestamp + " 定时器触发");
+         }
+   
+   
+         @Override
+         public void close() throws Exception {
+            tsTimerState.clear();
+         }
+      }
+   
+   }
+   
+   ~~~
+
+   
+
+## 8.3 Process Function 的应用例子
+
+### 8.3.1 TimerService 和 定时器（Timers）
+
+1. 10s内温度上升，则输出报警信息
+
+   > 逻辑：
+   >
+   > - 通过keyby对温度传感器id进行分组，避免传感器混乱
+   >
+   > - 自定义一个温度连续上升的监控类
+   >
+   >   1. 定义一个私有属性，时间间隔，作为接收设定的统计时间长度的变量
+   >   2. 还要定义两个状态，分别保存上一次的温度值和定时器时间戳，用于跟新来的数据对比
+   >   3. 在open的方法中初始化两个状态
+   >
+   >      - 温度值状态的初始化给一个Double的最小值，认为从第一条数据来就是上升趋势
+   >      - 定时器定义的时候不需要赋值。
+   >   4. 在processElement方法中进行逻辑处理
+   >
+   >      - 从状态属性中取出上一次的状态温度值和定时器时间戳
+   >      - 将上一次的温度值和新来记录的温度值对比，
+   >        - 如果新来记录的温度值比上一次的温度值高：
+   >          - 上一次的定时器时间戳为空的时候，认为温度是连续上涨，且本周期还没开始定时，所以可以开始设定定时器，同时把定时器的时间戳和新来的温度值更新到状态中。
+   >          - 上一次的定时器时间戳为空的时候，认为温度是连续上涨，但是本周期已经有定时器了，只需要将新来的温度更新到状态中即可
+   >        - 如果新来记录的温度值比上一次的温度值低：
+   >          - 同时定时器时间戳不为空的时候（正常来说不会为空，但要做判断预防空指针），将该定时器时间戳删除，同时将定时器时间戳状态清空，最后也要将新来的温度更新到状态中
+   >   5. 在onTimer方法中
+   >      - 只要触发了onTimer方法，都会认为符合了设定时间内连续上升的条件，那么直接输出告警信息
+   >      - 然后清空定时器时间戳状态
+   >   6. 在close方法中把上一次的温度值状态清空即可
+   >
+   > 
+
+   ~~~java
+   package com.kyle.api.processFunction;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.FilterFunction;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.api.common.state.ValueState;
+   import org.apache.flink.api.common.state.ValueStateDescriptor;
+   import org.apache.flink.api.java.tuple.Tuple;
+   import org.apache.flink.configuration.Configuration;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+   import org.apache.flink.util.Collector;
+   import org.apache.logging.log4j.util.Strings;
+   
+   /**
+    * @author kyle on 2021-12-09 8:35 上午
+    */
+   public class PorcessTuncTest02_Timer {
+   
+      public static void main(String[] args) throws Exception {
+   
+   
+         // socket 文本流
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+   
+         DataStreamSource<String> inputStream = env.socketTextStream("localhost", 9999);
+         SingleOutputStreamOperator<String> filterStream = inputStream.filter(new FilterFunction<String>() {
+            @Override
+            public boolean filter(String value) throws Exception {
+               return Strings.isNotBlank(value);
+            }
+         });
+   
+         env.setParallelism(1);
+   
+         // 转换成 SensorReading 类型
+         SingleOutputStreamOperator<SensorReading> mapStream = filterStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+   
+         // 测试 KeyedProcessFunction， 先分组然后自定义处理
+         mapStream.keyBy("id")
+                 .process(new TempConsIncreWarning(10))
+                 .print();
+   
+         env.execute();
+   
+      }
+      
+      // 实现自定义的处理函数
+      public static class TempConsIncreWarning extends KeyedProcessFunction<Tuple, SensorReading, String>{
+         // 定义私有属性， 当前统计的时间间隔
+         private Integer interval;
+   
+         public TempConsIncreWarning(Integer interval) {
+            this.interval = interval;
+         }
+   
+         //定义状态， 保存上一次的温度值，定时器时间戳
+         private ValueState<Double> lastTempState;
+         private ValueState<Long> timerTsState;
+   
+         @Override
+         public void open(Configuration parameters) throws Exception {
+            lastTempState = getRuntimeContext().getState(new ValueStateDescriptor<Double>("last-temp", Double.class, Double.MIN_VALUE));
+            timerTsState = getRuntimeContext().getState(new ValueStateDescriptor<Long>("timer-ts", Long.class));
+         }
+   
+         @Override
+         public void processElement(SensorReading value, Context ctx, Collector<String> out) throws Exception {
+            //取出状态值
+            Double lastTemp = lastTempState.value();
+            Long timerTs = timerTsState.value();
+   
+            //如果温度上升并且没有定时器的时候，注册10秒后的定时器， 开始等待
+            if (value.getTemperature() > lastTemp && timerTs == null){
+               Long ts = ctx.timerService().currentProcessingTime() + interval * 1000L;
+               ctx.timerService().registerProcessingTimeTimer(ts);
+               timerTsState.update(ts);
+            }
+   
+            //如果温度下降， 删除定时器
+            else if (value.getTemperature() < lastTemp && timerTs != null){
+               ctx.timerService().deleteProcessingTimeTimer(timerTs);
+               timerTsState.clear();
+            }
+   
+            // 更新温度状态
+            lastTempState.update(value.getTemperature());
+   
+         }
+   
+         @Override
+         public void onTimer(long timestamp, OnTimerContext ctx, Collector<String> out) throws Exception {
+            //定时器触发， 输出报警信息
+            out.collect("传感器" + ctx.getCurrentKey().getField(0) + "温度值连续" + interval + "s上升");
+            timerTsState.clear();
+         }
+   
+   
+         @Override
+         public void close() throws Exception {
+            lastTempState.clear();
+         }
+      }
+   
+   
+   }
+   
+   
+   ~~~
+
+   
+
+
+### 8.3.2 侧输出流(SideOutput)
+
+1. 高低温分流
+
+   > - 侧输出流通过OutputTag来实现
+   >   - 定义OutputTag的时候注意是以匿名类的方式，后面需要加上大括号。
+   > - 分流的时候使用到底层API的context才会有从output API。
+   > - 获取分流的方式
+   >   - 使用主流调用getSideOutput
+   >   - 主流需要是 SingleOutputStreamOperator, DataStream是没有getSideOutput方法的。
+
+   ~~~java
+   package com.kyle.api.processFunction;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.FilterFunction;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.functions.ProcessFunction;
+   import org.apache.flink.util.Collector;
+   import org.apache.flink.util.OutputTag;
+   import org.apache.logging.log4j.util.Strings;
+   
+   /**
+    * @author kyle on 2021-12-10 7:25 上午
+    */
+   public class ProcessFuncTest03_SideOutput {
+   
+      public static void main(String[] args) throws Exception {
+   
+         // socket 文本流
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+   
+         DataStreamSource<String> inputStream = env.socketTextStream("localhost", 9999);
+         SingleOutputStreamOperator<String> filterStream = inputStream.filter(new FilterFunction<String>() {
+            @Override
+            public boolean filter(String value) throws Exception {
+               return Strings.isNotBlank(value);
+            }
+         });
+   
+         env.setParallelism(1);
+   
+         // 转换成 SensorReading 类型
+         SingleOutputStreamOperator<SensorReading> mapStream = filterStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(" ");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         });
+   
+   
+         // 定义一个OutputTag， 用来表示侧输出 低温流
+         OutputTag<SensorReading> lowTempTag = new OutputTag<SensorReading>("lowTemp") {};
+   
+         // 测试ProcessFunction 自定义侧输出流实现分流操作
+         SingleOutputStreamOperator<Object> highTempStream = mapStream.process(new ProcessFunction<SensorReading, Object>() {
+            @Override
+            public void processElement(SensorReading value, Context ctx, Collector<Object> out) throws Exception {
+               // 温度高于30， 高温流输出到主流， 低于30度， 输出到侧输出流
+               if(value.getTemperature() > 30){
+                  out.collect(value);
+               }
+               else {
+                  ctx.output(lowTempTag, value);
+               }
+   
+            }
+         });
+   
+         highTempStream.print("high-temp");
+   
+         highTempStream.getSideOutput(lowTempTag).print("low-temp");
+   
+         env.execute();
+   
+      }
+   
+   }
+   
+   ~~~
+
+# 9 Flink 容错机制
+
+
+
+
+
+
+
+   
+
+
+
+
+
+
 
 
 
