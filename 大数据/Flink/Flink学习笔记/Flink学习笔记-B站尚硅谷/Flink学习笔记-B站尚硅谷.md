@@ -3344,6 +3344,257 @@ public class PartitionTest_01 {
 
 # 9 Flink 容错机制
 
+## 9.1 一致性检查点（Checkpoints）
+
+> 不同的任务在处理不同的数据，最后保存快照数据的时候，有的任务处理过而有的没处理过，就有状态不一致的问题。所以我们说的某一个时间点的快照， **这个时间点不是大家理解的处理时间意义上的时间点，而是所有任务都刚好处理完同一个数据的时间点。**
+
+### 9.1.1 Flink故障恢复机制的核心
+
+1. 简述
+
+   - Flink故障恢复机制的核心，即应用状态的一致性检查点
+   - 有状态流应用的一致检查点，其实就是所有任务的状态在某个时间点的一份拷贝（一份快照）；**这个时间点，应该是所有任务都恰好处理完一个相同的输入数据的时候。**
+
+2. 具体例子
+
+   <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gx8ekouqyvj30j80b5aar.jpg" alt="flink_parallelism_01" style="zoom:100%;" />
+
+   - 输入数据就是自然数字1，2 ，3 。。。。
+   - source任务进行读取任务，保存一个状态， 读取的偏移量，用于故障时重新读取数据
+   - 接下来的操作是求和，有两个并行的求和任务，把当前的数对2取模，对模得到的结果作为key做keyby，分别对奇偶数求和
+   - 做快照保存
+     - 数据读取到5， 同时偶数侧完成，奇数侧未完成
+       - 偶数侧刚好完成了2+4=6
+       - 奇数侧刚完成1+3 = 4 ，还没加5，5刚好在传输路上
+       - 这种情况就是数据读取到5了，其中偶数侧的求和任务完成了，但奇数侧求和任务未完成。
+       - 这个时间点不会checkpoints
+     - 数据读取到5， 并且偶数侧和奇数侧求和任务都完成
+       - 偶数侧刚好完成了2+4=6
+       - 奇数侧刚完成1+3+5=9
+       - 这种情况则是数据读取到5了，并且下游求和的所有任务都完成了， 
+       - 这个时间点会checkpoints
+
+
+
+
+
+## 9.2 从检查点恢复状态
+
+> - 在执行流应用的程序期间，Flink会定期保存状态的一致检查点
+> - 如果发生故障，Flink将会使用最近的检查点来一致恢复应用程序的状态，并重新启动处理流程
+> - 这种检查点的保存和恢复机制可以为应用程序状态提供“精确一次”的一致性，因为所有算子都会保存检查点并恢复其所有状态，这样一来所有的输入流就都会被重置到检查点完成时的位置。
+
+### 9.2.1 例子描述
+
+1. 发生故障
+
+   - 数据流持续流入， 
+   - 6进来后会被偶数侧求和， 2+4+6 变成12
+   - 7进来后，正在传输到奇数侧的任务处理节点，这时候奇数侧的任务处理节点挂了。
+
+   <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gx8fr8vdwaj30ky07474l.jpg" alt="flink_parallelism_01" style="zoom:100%;" />
+
+2. 重新启动（第一步）
+
+   - 重启之后，任务里面的状态是空的
+
+   <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gx8fyv7bulj30ka06naab.jpg" alt="flink_parallelism_01" style="zoom:100%;" />
+
+3. 重检查点获取状态（第二步）
+
+   - 重checkpoint中读取状态，将状态重置。
+   - 从检查点重启启动应用程序后，其内部状态与检查点完成时的状态完全相同
+
+   <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gx8g1kzhl8j30km0bpt9j.jpg" alt="flink_parallelism_01" style="zoom:100%;" />
+
+4. 重新处理数据（第三步）
+
+   - 开始消费并处理检查点到发生故障之间的所有数据
+     - source要从检查点保存的偏移量提交重新消费，比如重新提交5，重新消费6，7
+
+   <img src="https://tva1.sinaimg.cn/large/008i3skNgy1gx8g2j6bd7j30i506waa8.jpg" alt="flink_parallelism_01" style="zoom:100%;" />
+
+   
+
+   
+
+## 9.3 检查点的实现算法
+
+### 9.3.1 思想
+
+1. 一种简单的想法
+   - 暂停应用， 保存状态的检查点，再重新恢复应用
+2. Flink的改进实现
+   - 基于Chandy-Lamport算法的分布式快照
+   - 将检查点的保存和数据处理分离开，不暂停整个应用
+
+### 9.3.2 检查点分界线 （Checkpoint Barrier）
+
+1. Flink的检查点算法用到了一种称为分界线（Barrier）的特殊数据形式，用来将一条流上数据按照不同的检查点分开
+
+2. 分界线之前到来的数据导致的状态更改，都会被包含在当前分界线所属的检查点中；而基于分界线之后的数据导致的所有更改，就会被包含在之后的检查点中。
+
+3. 图示理解
+
+   1. 现在是一个有两个输入流的应用程序，用并行的两个Source任务来读取
+
+      > 偶数求和状态：只处理了一个黄2 当前值为2
+      >
+      > 奇数求和状态：处理了一个黄1，一个蓝1，一个黄3  --- 当前值为5
+
+   ![flink_checkpoints_06](https://tva1.sinaimg.cn/large/008i3skNgy1gx9n9qawu4j30lv0bgdgl.jpg)
+
+   
+
+   2. JobManager会向每个source任务发送一条带有新检查点ID的消息，通过这种方式来启动检查点
+
+      > 三角形代表检查点信息，里面的数据代表检查点ID
+      >
+      > 下图表示JobManager在source的蓝3和蓝4， 黄4和黄5之间插入了一个分界线（barrier）
+
+      ![flink_checkpoints_07](https://tva1.sinaimg.cn/large/008i3skNgy1gx9nhssj1fj30n509zgmc.jpg)
+
+   3. 触发检查点动作
+
+      > - 数据源将它们的状态写入检查点，并发出一个检查点barrier
+      > - 状态后端在状态存入检查点后，会返回通知给source任务，source任务就会向JobManager确认检查点完成
+      > - barrier的传递方式:广播到下游所有任务
+
+      ![flink_checkpoints_08](https://tva1.sinaimg.cn/large/008i3skNgy1gx9nnkndx2j30nu0bxwfg.jpg)
+
+   4. 下游任务检查点触发时机
+
+      > - 分界线对齐: barrier向下游传递,sum任务会等待所有输入分区的barrier到达
+      >   - 理解: barrier的本质是 **分界线之前到来的数据导致的状态更改，都会被包含在当前分界线所属的检查点中**
+      > - 对于barrier已经到达的分区,继续到达的数据会被缓存
+      >   - 理解: **checkpoints保存状态的定义是 同时处理完同一份数据的状态**, 所以barrier后面来的数据不进行计算,否则会和上游任务checkpoints的状态不一致.
+      >   - 如下图,我们**要的是source为蓝3和蓝4的数据状态**,蓝4虽然到达了计算节点,但它是数据barrier2分界线后面的数据,不应该算进本次的checkpoints,所以不会进行计算,而是**放入缓存**.
+      > - 而barrier尚未到达的分区,数据会被正常处理
+      >   - 如下如, 黄4在barrier2前面,黄4到达计算节点后,会立刻被计算.
+
+      ![flink_checkpoints_09](https://tva1.sinaimg.cn/large/008i3skNgy1gx9nxtlhs7j30m90bgaaz.jpg)
+
+   5. 触发检查点
+
+      > - 当收到所有输入分区的barrier时, 任务就将其状态保存到状态后端的检查点中,然后将barrier继续向下游转发
+      > - 如下图最后是把蓝8和黄8保存到状态后端,然后再把barrier往下游传递
+      >
+      > 
+
+      ![flink_checkpoints_10](https://tva1.sinaimg.cn/large/008i3skNgy1gx9o3p8ry4j30l70b5dgy.jpg)
+
+   6. 向下游转发检查点barrier后,任务继续正常进行数据处理
+
+      > 继续处理数据时,会按顺序先处理缓存中已经到了的数据
+
+      ![flink_checkpoints_11](https://tva1.sinaimg.cn/large/008i3skNgy1gx9ojr1b7zj30n90ai0ti.jpg)
+
+   7. 所有任务确认状态保存到checkpoint完毕
+
+      > Sink任务向JobManager确认状态保存到checkpoint中
+      >
+      > 当所有任务都确认已成功将状态保存到检查点时，本次的检查点就真正的完成了。
+
+      ![flink_checkpoints_12](https://tva1.sinaimg.cn/large/008i3skNgy1gx9omknad1j30mr0bhq3t.jpg)
+
+   
+
+   
+
+## 9.4 保存点（Savepoints）
+
+### 9.4.1 简述
+
+1. Flink还提供了自定义的镜像保存功能，就是保存点
+2. 原则上，创建保存点使用的算法和检查点完成相同，因此保存点可以认为就是具有一些额外元数据的检查点
+3. Flink不会自动创建保存点，因此用户必需明确触发创建操作
+4. 保存点是一个强大的功能。除了故障恢复外，保存点可以用于：有计划的手动备份，更新应用程序，版本迁移，暂停和重启应用等。
+
+
+
+## 9.5 检查点和重启策略配置
+
+### 9.5.1 检查点
+
+> Flink中检查点默认是关闭的
+
+1. 启用检查点
+
+   ~~~java
+   // 2. 检查点配置
+   // 不设置时间间隔 默认500毫秒
+   env.enableCheckpointing();
+   //
+   env.enableCheckpointing(300L);
+   //
+   env.enableCheckpointing(300, CheckpointingMode.EXACTLY_ONCE);
+   // 高级选项
+   env.getCheckpointConfig().setCheckpointingMode(CheckpointingMode.EXACTLY_ONCE);
+   // 检查点超时时间，不设置可能导致当前任务阻塞
+   env.getCheckpointConfig().setCheckpointTimeout(60000L);
+   // 设置不同barrier id的最大个数
+   env.getCheckpointConfig().setMaxConcurrentCheckpoints(2);
+   // checkpoint 之间的间隔， 上一个checkpoint完成后 最少等100毫秒后才能触发下一次的checkpoint，
+   // 这个配置主要是为了预防checkpoint太频繁， 影响数据处理，而留一定空闲时间给数据处理
+   // 这个配置会覆盖掉 setMaxConcurrentCheckpoints 的配置，因为这个配置会导致当前checkpoint只能是1.
+   env.getCheckpointConfig().setMinPauseBetweenCheckpoints(100L);
+   // 默认是0， checkpoint挂了， 任务也会挂了重启
+   // 可以自己设置一个值表示允许checkpoint失败的次数
+   env.getCheckpointConfig().setTolerableCheckpointFailureNumber(2);
+   ~~~
+
+2. 重启策略
+
+   ~~~java
+   // 3. 重启策略
+   // 固定延迟重启 --- 重启3次， 每次间隔10秒
+   env.setRestartStrategy(RestartStrategies.fixedDelayRestart(3, 10000L));
+   // 失败率重启  --- 10分钟内 最多启动3次， 每次重启间隔1分钟
+   env.setRestartStrategy(RestartStrategies.failureRateRestart(3, Time.minutes(10), Time.minutes(1)));
+   ~~~
+
+   
+
+   
+
+
+
+
+
+
+
+
+
+   
+
+   
+
+   
+
+   
+
+
+
+   
+
+   
+
+   
+
+   
+
+   
+
+   
+
+   
+
+
+
+
+
+
+
 
 
 
