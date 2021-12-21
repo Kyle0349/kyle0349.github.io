@@ -3669,9 +3669,1868 @@ public class PartitionTest_01 {
 
 # 11 Table API 和 Flink SQL
 
-> 
+> - Table API 是一套内嵌在Java和Scala语言中的查询API，它允许以非常直观的方式组合来自一些关系运算符的查询
+> - Flink的SQL支持基于实现了SQL标准的Apache Calcite
 
-## 11.1 
+![flink_table_api_01](https://tva1.sinaimg.cn/large/008i3skNgy1gxd20jkmcyj30rr09oq3y.jpg)
+
+## 11.1 几种Table场景的环境入口
+
+~~~java
+// 1. 创建环境
+StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+env.setParallelism(1);
+~~~
+
+
+
+### 11.1.1 基于老版本planner的流处理
+
+1. 使用EnvironmentSettings指定planner
+
+   ~~~java
+   // 1.1 基于老版本planner的流处理
+   EnvironmentSettings oldStreamSettings = EnvironmentSettings.newInstance()
+           .useOldPlanner()
+           .inStreamingMode()
+           .build();
+   StreamTableEnvironment oldStreamTableEnv = StreamTableEnvironment.create(env, oldStreamSettings);
+   ~~~
+
+### 11.1.2 基于老版本planner的批处理
+
+1. 要获取批处理的环境，通过batchEnv来创建
+
+   ~~~java
+   // 1.2 基于老版本planner的批处理
+   ExecutionEnvironment batchEnv = ExecutionEnvironment.getExecutionEnvironment();
+   BatchTableEnvironment oldBatchTableEnv = BatchTableEnvironment.create(batchEnv);
+   ~~~
+
+### 11.1.3 基于Blink的planner的流处理
+
+1. 使用EnvironmentSettings指定blink planner
+
+   ~~~java
+   // 1.3 基于Blink的planner的流处理
+   EnvironmentSettings blinkStreamSettings = EnvironmentSettings.newInstance()
+           .useBlinkPlanner()
+           .inStreamingMode()
+           .build();
+   StreamTableEnvironment blinkStreamTableEnv = StreamTableEnvironment.create(env, blinkStreamSettings);
+   ~~~
+
+### 11.1.4 基于blink的planner的批处理
+
+1. blink真正做到的批流统一，所以即时是批处理，也不用再创建批的环境了。
+
+   ~~~java
+   //1.4 基于blink的批处理
+   EnvironmentSettings blinkBatchSettings = EnvironmentSettings.newInstance()
+           .useBlinkPlanner()
+           .inBatchMode()
+           .build();
+   TableEnvironment blinkBatchTableEnv = TableEnvironment.create(blinkBatchSettings);
+   ~~~
+
+
+
+## 11.2 表 （Table）
+
+### 11.2.1 简述
+
+1. TableEnvironment可以注册目录Catalog，并可以基于Catalog注册表
+2. 表（Table）是由一个“标识符”（identifier）来指定的，由3部分组成：Catalog名，数据库（database）和对象名
+3. 表可以是常规表，也可以是虚拟的（视图，View）
+   - 常规表：一般可以用来描述外部数据，比如文件，数据库表或者消息队列的数据，也可以直接从DataStream转换而来。
+   - 虚拟：可以从现有的表中创建，通常是table API 或者 SQL 查询的一个结果集。
+
+### 11.2.2 创建表
+
+1. 链接外部文件创建表 -CSV
+
+   ~~~java
+   String filePath = "/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor_table.txt";
+   tableEnv.connect(new FileSystem().path(filePath))
+           .withFormat(new Csv())
+           .withSchema(new Schema()
+                   .field("id", DataTypes.STRING())
+                   .field("timestamp", DataTypes.BIGINT())
+                   .field("temp", DataTypes.DOUBLE())
+           )
+           .createTemporaryTable("inputTable");
+   
+   Table inputTable = tableEnv.from("inputTable");
+   inputTable.printSchema();
+   tableEnv.toAppendStream(inputTable, Row.class).print();
+   
+   env.execute();
+   ~~~
+
+### 11.2.3 表的查询 - Table API
+
+1. 打印输出时，注意toAppendStream和toRetractStream的区别，**聚合函数的结果要用toRetractStream**。
+
+   - 如下图的输出， aggTable的流，输出结果是一个元祖，第一个元素是布尔值，来一条数据的时候，输出了两条信息，第一条布尔值为false的时候，表示前一条数据的撤回，布尔值为true的时候表示新来的一条数据的插入。把更新操作当做了 一次删除一次插入来做的，通过布尔值判断，toRetractStream表示撤回流，表示要做更新操作。
+
+   ~~~java
+   3 查询转换
+   // 3.1 Table API
+   // 简单筛选转换
+   Table resutTable = inputTable.select("id, temp")
+           .filter("id === 'sensor_01'");
+   
+   // 聚合统计
+   Table aggTable = inputTable.groupBy("id")
+           .select("id, id.count as count, temp.avg as avgTemp");
+   
+   // 3.2 SQL
+   tableEnv.sqlQuery("select id, temp from inputTable where id = 'sensor_01'");
+   Table sqlAggTable = tableEnv.sqlQuery("select id, count(id) as cnt , avg(temp) as avgTemp from inputTable group by id");
+   
+   
+   // 打印输出
+   tableEnv.toAppendStream(resutTable, Row.class).print("result");
+   tableEnv.toRetractStream(aggTable, Row.class).print("aggTable");
+   //      tableEnv.toAppendStream(sqlAggTable, Row.class).print("sqlAggTable");
+   ~~~
+
+   ![flink_table_api_02](https://tva1.sinaimg.cn/large/008i3skNgy1gxfdbh51bbj317q0j476y.jpg)
+
+### 11.2.4 表的输出 输出到文件
+
+1. 直接输出到文件 - 只是插入没有更新
+
+   ~~~java
+   
+   // 4. 输出到文件
+   // 4.1 链接外部文件， 注册输出表
+   String outFilePath = "/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/out.txt";
+   tableEnv.connect(new FileSystem().path(outFilePath))
+           .withFormat(new Csv())
+           .withSchema(new Schema()
+                   .field("id", DataTypes.STRING())
+                   .field("cnt", DataTypes.BIGINT())
+                   .field("temperature", DataTypes.DOUBLE())
+           )
+           .createTemporaryTable("outputTable");
+   
+   resutTable.executeInsert("outputTable");
+   // 聚合结果有更新 csvSink会报错
+   // aggTable.executeInsert("outputTable");
+   
+   ~~~
+
+### 11.2.5 kafka 数据管道测试
+
+1. 创建环境
+
+2. 链接kafka， 读取数据
+
+   - kafka的version使用的是universal(通用版本)
+
+3. 做逻辑转换， **注意，kafka作为消息队列，也是不支持更新删除的，所以聚合流写入kafka也会报错**
+
+4. 链接kafka，输出到kafka不用的topic
+
+   ~~~java
+   package com.kyle.api.table;
+   
+   import org.apache.flink.api.java.ExecutionEnvironment;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.table.api.DataTypes;
+   import org.apache.flink.table.api.EnvironmentSettings;
+   import org.apache.flink.table.api.Table;
+   import org.apache.flink.table.api.TableEnvironment;
+   import org.apache.flink.table.api.bridge.java.BatchTableEnvironment;
+   import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+   import org.apache.flink.table.descriptors.Csv;
+   import org.apache.flink.table.descriptors.FileSystem;
+   import org.apache.flink.table.descriptors.Kafka;
+   import org.apache.flink.table.descriptors.Schema;
+   import org.apache.flink.types.Row;
+   
+   /**
+    * @author kyle on 2021-12-16 8:32 上午
+    */
+   public class TableTest06_kafka {
+   
+   
+      public static void main(String[] args) throws Exception {
+   
+         // 1. 创建环境
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+         env.setParallelism(1);
+   
+         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+   
+   
+         // 1.1 基于老版本planner的流处理
+         EnvironmentSettings oldStreamSettings = EnvironmentSettings.newInstance()
+                 .useOldPlanner()
+                 .inStreamingMode()
+                 .build();
+         StreamTableEnvironment oldStreamTableEnv = StreamTableEnvironment.create(env, oldStreamSettings);
+   
+   
+         // 1.2 基于老版本planner的批处理
+         ExecutionEnvironment batchEnv = ExecutionEnvironment.getExecutionEnvironment();
+         BatchTableEnvironment oldBatchTableEnv = BatchTableEnvironment.create(batchEnv);
+   
+   
+         // 1.3 基于Blink的planner的流处理
+         EnvironmentSettings blinkStreamSettings = EnvironmentSettings.newInstance()
+                 .useBlinkPlanner()
+                 .inStreamingMode()
+                 .build();
+         StreamTableEnvironment blinkStreamTableEnv = StreamTableEnvironment.create(env, blinkStreamSettings);
+   
+         //1.4 基于blink的批处理
+         EnvironmentSettings blinkBatchSettings = EnvironmentSettings.newInstance()
+                 .useBlinkPlanner()
+                 .inBatchMode()
+                 .build();
+         TableEnvironment blinkBatchTableEnv = TableEnvironment.create(blinkBatchSettings);
+   
+   
+         // 2. 链接kafka， 读取数据
+         tableEnv.connect(new Kafka()
+                 .version("universal")
+                 .topic("sensor")
+                 .property("zookeeper", "192.168.2.113:2181")
+                 .property("bootstrap.servers", "192.168.2.113:9092")
+         )
+                 .withFormat(new Csv())
+                 .withSchema(new Schema()
+                         .field("id", DataTypes.STRING())
+                         .field("timestamp", DataTypes.BIGINT())
+                         .field("temp", DataTypes.DOUBLE())
+   
+                 )
+                 .createTemporaryTable("inputTable");
+   
+         // 3. 简单转换
+         Table sensorTable = tableEnv.from("inputTable");
+         Table resutTable = sensorTable.select("id, temp")
+                 .filter("id === 'sensor_01'");
+   
+         // 聚合统计
+         Table aggTable = sensorTable.groupBy("id")
+                 .select("id, id.count as count, temp.avg as avgTemp");
+   
+         // 4. 链接kafka链接，输出到不同的topic
+         tableEnv.connect(new Kafka()
+                 .version("universal")
+                 .topic("sensor_sink")
+                 .property("zookeeper", "192.168.2.113:2181")
+                 .property("bootstrap.servers", "192.168.2.113:9092")
+         )
+                 .withFormat(new Csv())
+                 .withSchema(new Schema()
+                         .field("id", DataTypes.STRING())
+   //                      .field("timestamp", DataTypes.BIGINT())
+                         .field("temp", DataTypes.DOUBLE())
+   
+                 )
+                 .createTemporaryTable("outputTable");
+         
+   
+         tableEnv.toAppendStream(resutTable, Row.class).print();
+         resutTable.executeInsert("outputTable");
+   
+         env.execute();
+   
+   
+      }
+   
+   
+   }
+   
+   ~~~
+
+### 11.2.6 更新模式
+
+1. 对于流式查询，需要声明如何在表和外部连接器之间执行转换
+
+2. 与外部系统交换的消息类型，由更新模式（update mode）指定
+
+   - 追加模式（Append）
+     - 表只做插入模式，和外部连接器只要交换插入消息
+   - 撤回模式（Retract）
+     - 表和外部连接器交换添加（add）和撤回（Retract）消息
+     - 插入操作（Insert）编码为Add消息；删除（Delete）编码为Retract消息；更新（Update）编码为上一条的Retract和下一条的Add消息
+   - 更新插入模式（Upsert）
+     - 更新和插入都被编码为Upsert消息，删除编码为Delete消息
+
+3. 读取kafka的数据，更新模式插入到es
+
+   ~~~java
+   package com.kyle.api.table;
+   
+   import org.apache.flink.api.java.ExecutionEnvironment;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.table.api.DataTypes;
+   import org.apache.flink.table.api.EnvironmentSettings;
+   import org.apache.flink.table.api.Table;
+   import org.apache.flink.table.api.TableEnvironment;
+   import org.apache.flink.table.api.bridge.java.BatchTableEnvironment;
+   import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+   import org.apache.flink.table.descriptors.*;
+   import org.apache.flink.types.Row;
+   
+   /**
+    * @author kyle on 2021-12-17 8:32 上午
+    */
+   public class TableTest07_Upsert {
+   
+   
+      public static void main(String[] args) throws Exception {
+   
+         // 1. 创建环境
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+         env.setParallelism(1);
+   
+         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+   
+   
+         // 1.1 基于老版本planner的流处理
+         EnvironmentSettings oldStreamSettings = EnvironmentSettings.newInstance()
+                 .useOldPlanner()
+                 .inStreamingMode()
+                 .build();
+         StreamTableEnvironment oldStreamTableEnv = StreamTableEnvironment.create(env, oldStreamSettings);
+   
+   
+         // 1.2 基于老版本planner的批处理
+         ExecutionEnvironment batchEnv = ExecutionEnvironment.getExecutionEnvironment();
+         BatchTableEnvironment oldBatchTableEnv = BatchTableEnvironment.create(batchEnv);
+   
+   
+         // 1.3 基于Blink的planner的流处理
+         EnvironmentSettings blinkStreamSettings = EnvironmentSettings.newInstance()
+                 .useBlinkPlanner()
+                 .inStreamingMode()
+                 .build();
+         StreamTableEnvironment blinkStreamTableEnv = StreamTableEnvironment.create(env, blinkStreamSettings);
+   
+         //1.4 基于blink的批处理
+         EnvironmentSettings blinkBatchSettings = EnvironmentSettings.newInstance()
+                 .useBlinkPlanner()
+                 .inBatchMode()
+                 .build();
+         TableEnvironment blinkBatchTableEnv = TableEnvironment.create(blinkBatchSettings);
+   
+   
+         // 2. 链接kafka， 读取数据
+         tableEnv.connect(new Kafka()
+                 .version("universal")
+                 .topic("sensor")
+                 .property("zookeeper", "192.168.2.113:2181")
+                 .property("bootstrap.servers", "192.168.2.113:9092")
+         )
+                 .withFormat(new Csv())
+                 .withSchema(new Schema()
+                         .field("id", DataTypes.STRING())
+                         .field("timestamp", DataTypes.BIGINT())
+                         .field("temp", DataTypes.DOUBLE())
+   
+                 )
+                 .createTemporaryTable("inputTable");
+   
+   
+         // 3. 简单转换
+         Table sensorTable = tableEnv.from("inputTable");
+         Table resutTable = sensorTable.select("id, temp")
+                 .filter("id === 'sensor_01'");
+   
+         // 聚合统计
+         Table aggTable = sensorTable.groupBy("id")
+                 .select("id, id.count as count, temp.avg as avgTemp");
+   
+         // 4. 链接es, 将结果输出到es
+         tableEnv.connect(new Elasticsearch()
+                 .version("7")
+                 .host("192.168.2.113", 9200, "http")
+                 .index("sensor3")
+                 .documentType("_doc")
+                 .bulkFlushMaxActions(1)
+         )
+                 .inAppendMode()
+                 .withFormat(new Json())
+                 .withSchema(new Schema()
+                         .field("id", DataTypes.STRING())
+                         .field("timestamp", DataTypes.BIGINT())
+                         .field("temp", DataTypes.DOUBLE())
+   
+                 )
+                 .createTemporaryTable("outputTable");
+   
+   
+         tableEnv.toAppendStream(resutTable, Row.class).print();
+         tableEnv.toRetractStream(aggTable, Row.class).print();
+         aggTable.executeInsert("outputTable");
+   
+   
+         env.execute();
+   
+   
+      }
+   
+   
+   }
+   
+   ~~~
+
+### 11.2.7 输出到其他外部系统
+
+1. mysql
+
+   ~~~java
+   package com.kyle.api.table;
+   
+   import org.apache.flink.table.api.*;
+   
+   import static org.apache.flink.table.api.Expressions.*;
+   
+   import org.apache.flink.api.java.ExecutionEnvironment;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.table.api.bridge.java.BatchTableEnvironment;
+   import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+   import org.apache.flink.table.descriptors.*;
+   import org.apache.flink.types.Row;
+   
+   /**
+    * @author kyle on 2021-12-19 10:32 上午
+    */
+   public class TableTest08_Upsert_Mysql {
+   
+   
+      public static void main(String[] args) throws Exception {
+   
+         // 1. 创建环境
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+         env.setParallelism(1);
+   
+         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+   
+   
+         // 1.1 基于老版本planner的流处理
+         EnvironmentSettings oldStreamSettings = EnvironmentSettings.newInstance()
+                 .useOldPlanner()
+                 .inStreamingMode()
+                 .build();
+         StreamTableEnvironment oldStreamTableEnv = StreamTableEnvironment.create(env, oldStreamSettings);
+   
+   
+         // 1.2 基于老版本planner的批处理
+         ExecutionEnvironment batchEnv = ExecutionEnvironment.getExecutionEnvironment();
+         BatchTableEnvironment oldBatchTableEnv = BatchTableEnvironment.create(batchEnv);
+   
+   
+         // 1.3 基于Blink的planner的流处理
+         EnvironmentSettings blinkStreamSettings = EnvironmentSettings.newInstance()
+                 .useBlinkPlanner()
+                 .inStreamingMode()
+                 .build();
+         StreamTableEnvironment blinkStreamTableEnv = StreamTableEnvironment.create(env, blinkStreamSettings);
+   
+         //1.4 基于blink的批处理
+         EnvironmentSettings blinkBatchSettings = EnvironmentSettings.newInstance()
+                 .useBlinkPlanner()
+                 .inBatchMode()
+                 .build();
+         TableEnvironment blinkBatchTableEnv = TableEnvironment.create(blinkBatchSettings);
+   
+   
+         // 2. 链接kafka， 读取数据
+         tableEnv.connect(new Kafka()
+                 .version("universal")
+                 .topic("sensor")
+                 .property("zookeeper", "10.0.0.10:2181")
+                 .property("bootstrap.servers", "10.0.0.10:9092")
+         )
+                 .withFormat(new Csv())
+                 .withSchema(new Schema()
+                         .field("id", DataTypes.STRING())
+                         .field("timestamp", DataTypes.BIGINT())
+                         .field("temp", DataTypes.DOUBLE())
+   
+                 )
+                 .createTemporaryTable("inputTable");
+   
+         // 3. 简单转换
+         Table sensorTable = tableEnv.from("inputTable");
+         Table resutTable = sensorTable.select("id, temp")
+                 .filter("id === 'sensor_01'");
+   
+         // 聚合统计
+         Table aggTable2 = sensorTable.groupBy($("id")).select($("id"), $("id").count().as("cnt"));
+   
+         // 4. 创建Table来描述Mysql中的数据
+         String sinkDDL =
+                 "create table jdbcOutputTable (" +
+                         " id varchar(20) not null, " +
+                         " cnt bigint not null, " +
+                         " PRIMARY KEY (id) not ENFORCED" +
+                         ") with (" +
+                         " 'connector' = 'jdbc', " +
+                         " 'url' = 'jdbc:mysql://localhost:3306/test?serverTimezone=UTC&useUnicode=true&characterEncoding=UTF-8', " +
+                         " 'table-name' = 'sensor_count1', " +
+                         " 'driver' = 'com.mysql.jdbc.Driver', " +
+                         " 'username' = 'root', " +
+                         " 'password' = 'root' )";
+   
+         tableEnv.executeSql(sinkDDL); //执行DDL创建
+   
+         tableEnv.toAppendStream(resutTable, Row.class).print();
+         tableEnv.toRetractStream(aggTable2, Row.class).print();
+         aggTable2.executeInsert("jdbcOutputTable");
+   
+         env.execute();
+   
+      }
+   
+   }
+   
+   ~~~
+
+
+
+### 11.2.8 Table和DataStream的转换
+
+1. 表可以转换为DataStream或者DataSet， 这样自定义流处理或者批处理程序就可以继续在TableAPI或者SQL查询的结果上运行了
+
+2. 将表转换为DataStream或者DataSet时，需要指定生成的数据类型，即要将表的每一行转换的数据类型
+
+3. 表作为流式查询的结果，是动态更新的
+
+4. 将Table转换成DataStream
+
+   > 转换有两种转换模式：追加（Append）模式和撤回（Retract）模式
+
+   - 追加模式（Append Mode）
+
+     - 用于表只会被插入（Insert）操作更改的场景
+
+     - ~~~java
+       DataStream<Row> resultStream = tableEnv.toAppendStream(resultTable, Row.class);
+       ~~~
+
+   - 撤回模式（Retract Mode）
+
+     - 用于任何场景。类似于更新模式中Retract模式，它只有Insert和Delete两类操作
+
+     - 得到的数据会增加一个Boolean类型的标识位（返回的第一个字段），用它来表示到底是新增的数据（Insert）还是被删除的数据（Delete）
+
+     - ~~~java
+       DataStream<Tuple2<Boolean, Row>> aggResultStream = tableEnv.toRetractStream(aggResultTable , Row.class);
+       ~~~
+
+5. 将DataStream装换成Table
+
+   - 对于一个DataStream，可以直接转换成Table，进而方便调用TableAPI做转换操作
+
+     ~~~java
+     DataStream<SensorReading> dataStream = ...
+     Table sensorTable = tableEnv.fromDataStream(dataStream);
+     ~~~
+
+   - 默认转换后的Table schema 和 DataStream中的字段定义一一对应，也可以单独指定出来
+
+     ~~~java
+     DataStream<SensorReading> dataStream = ...
+     Table sensorTable = tableEnv.fromDataStream(dataStream, "id, timestamp as ts, temperature");
+     ~~~
+
+
+
+### 11.2.9 创建临时视图（Temporary View）
+
+1. 基于DataStream创建临时视图
+
+   - ~~~java
+     tableEnv.createTemporaryView("sensorView", dataStream);
+     tableEnv.createTemporaryView("sensorView", dataStream, "id, temperature, timestamp as ts");
+     ~~~
+
+2. 基于table创建临时视图
+
+   - ~~~java
+     tableEnv.createTemporaryView("sensorView", sensorTable);
+     ~~~
+
+
+
+### 11.2.10 查看执行计划
+
+1. Table API提供了一种机制来解释计算表的逻辑和优化查询计划
+
+2. 查看执行计划，可以通过TableEnviroment.explain(table)方法或TableEnviroment.explain方法完成，返回一个字符串，描述三个计划
+
+   - 优化的逻辑查询计划
+
+   - 优化后的逻辑查询计划
+
+   - 实际执行计划
+
+   - ```java
+     // 聚合统计
+     Table aggTable2 = sensorTable.groupBy($("id")).select($("id"), $("id").count().as("cnt"));
+     String explain = tableEnv.explain(aggTable2);
+     System.out.println(explain);
+     ```
+
+     ~~~java
+     == Abstract Syntax Tree ==
+     LogicalProject(id=[$0], cnt=[$1])
+     +- LogicalAggregate(group=[{0}], EXPR$0=[COUNT($0)])
+        +- LogicalTableScan(table=[[default_catalog, default_database, inputTable, source: [KafkaTableSource(id, timestamp, temp)]]])
+     
+     == Optimized Logical Plan ==
+     GroupAggregate(groupBy=[id], select=[id, COUNT(id) AS EXPR$0])
+     +- Exchange(distribution=[hash[id]])
+        +- LegacyTableSourceScan(table=[[default_catalog, default_database, inputTable, source: [KafkaTableSource(id, timestamp, temp)]]], fields=[id, timestamp, temp])
+     
+     == Physical Execution Plan ==
+     Stage 1 : Data Source
+     	content : Source: KafkaTableSource(id, timestamp, temp)
+     
+     	Stage 2 : Operator
+     		content : SourceConversion(table=[default_catalog.default_database.inputTable, source: [KafkaTableSource(id, timestamp, temp)]], fields=[id, timestamp, temp])
+     		ship_strategy : FORWARD
+     
+     		Stage 4 : Operator
+     			content : GroupAggregate(groupBy=[id], select=[id, COUNT(id) AS EXPR$0])
+     			ship_strategy : HASH
+     ~~~
+
+
+
+### 11.2.11 动态表和持续查询
+
+1. 流处理和关系代数的区别
+
+   | -                         | 关系代数（表）/SQL         | 流处理                                       |
+   | ------------------------- | -------------------------- | -------------------------------------------- |
+   | 处理的数据对象            | 字段元祖的有界集合         | 字段元祖的无限序列                           |
+   | 查询（Query）对数据的访问 | 可以访问到完成的数据输入   | 无法访问所有数据，必须持续“等待”流式输入     |
+   | 查询终止条件              | 生成固定大小的结果集后终止 | 永不停止，根据持续收到的数据不断更新查询结果 |
+
+2. 动态表（Dynamic Tables）
+
+   - 动态表是Flink对流数据的Table API和 SQL 支持的核心概念
+
+   - 与表批处理数据的静态表不同，动态表是随时间变化的。
+
+   - **持续查询（Continuous Query）**
+
+     - 动态表可以像静态表的批处理一样进行查询，查询一个动态表会产生持续查询（Continuous Query）
+     - 连续查询永远不会终止，并会生成另一个动态表
+     - 查询会不断更新其动态结果表，以反映其动态输入表上的更改
+
+   - 流式表查询的处理过程：
+
+     ![flink_dynamic_table_01](https://tva1.sinaimg.cn/large/008i3skNgy1gxj59nb5eoj31wm0eq0v4.jpg)
+
+     1. 首先 数据以流的方式进入，然后转换成动态表1
+     2. 动态表1后面加入一个查询，生成结果动态表2，这个查询实际上是一个持续查询，
+        - 每来一个数据， 动态表1都要变化一下，这个持续查询也要跟着查询一次，结果动态表2要更新一次。
+     3. 结果动态表2的更新还要转化为流。
+
+3. 实例
+
+   1. 将流转换成动态表
+
+      - 为了处理带有关系查询的流，必须先将其转为表
+
+      - 从概念上讲，流的每个数据记录，都被解释为对结果表的插入（Insert）操作
+
+        ![flink_dynamic_table_02](https://tva1.sinaimg.cn/large/008i3skNgy1gxj5k28pe6j31l80mqtc8.jpg)
+
+   2. 持续查询
+
+      - 持续查询会在动态表上做计算处理，并作为结果生成新的动态表
+
+        ![flink_dynamic_table_03](https://tva1.sinaimg.cn/large/008i3skNgy1gxj5kiwwnhj31j40swn09.jpg)
+
+   3. 将动态表转换成DataStream
+
+      	- 与常规的数据库表一样，动态表可以通过插入，更新和删除更改，进行持续的修改
+       - 将动态表转换为流或者写入外部系统时，需要对这些更改进行编码，并对外部系统有一定要求，支持删除，撤回等。
+          - 仅追加流（Append-only）
+            	- 仅通过插入（Insert）更改来修改的动态表，可以直接转换为仅追加流
+         - 撤回流（Retract）
+           - 撤回流包含两类信息的流：添加（Add）消息和撤回（Retract）消息
+         - 更新插入流（Upsert）
+           - Upsert流也包含两种类型的消息：Upsert消息和删除（Delete）消息
+
+      ![flink_dynamic_table_04](https://tva1.sinaimg.cn/large/008i3skNgy1gxj5nzf9faj31da0u0gp2.jpg)
+
+
+
+### 11.2.12 时间特性 （Time Attributes）
+
+1. 简述
+   1. 基于时间的操作（比如Table API 和 SQL中窗口操作）， 需要定义相关的时间语义和时间数据来源的信息
+   2. Table可以提供一个逻辑上的时间字段，用于在表处理程序中，指示时间和访问相应的时间戳
+   3. 时间属性，可以是每个表schema的一部分。 一旦定义了时间属性，它就可以作为一个字段引用，并且可以在基于时间的操作使用
+   4. 时间属性的行为类似于常规时间戳，可以访问，并且进行计算。
+
+2. 定义处理时间（Processing Time）
+
+   > 处理时间语义下， 允许表处理程序根据机器的本地时间生成结果。它是时间的最简单概念。它既不需要提取时间戳，也不要生产watermark
+
+   1. 由dataStream转换成表时定义：
+
+      1. 在定义schema期间，可以使用.proctime, 指定字段名定义处理时间字段
+
+      2. 这个proctime属性只能通过附加逻辑字段，来扩展物理schema。因此只能在schema定义的末尾定义
+
+      3. ~~~java
+         package com.kyle.api.table;
+         
+         import com.kyle.bean.SensorReading;
+         import org.apache.flink.api.common.functions.MapFunction;
+         import org.apache.flink.streaming.api.datastream.DataStreamSource;
+         import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+         import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+         import org.apache.flink.table.api.Table;
+         import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+         import org.apache.flink.types.Row;
+         
+         /**
+          * @author kyle on 2021-12-19 3:27 下午
+          */
+         public class TableTest09_TimeAndWindow {
+         
+            public static void main(String[] args) throws Exception {
+         
+         
+               // 1. 创建环境
+               StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+               env.setParallelism(1);
+         
+               StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+         
+         
+               // 读入文件数据， 得到DataStream
+               String filePath = "/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor_table.txt";
+               DataStreamSource<String> inputStream = env.readTextFile(filePath);
+         
+         
+               // 3. 转换成POJO
+               // 转换成 SensorReading 类型
+               SingleOutputStreamOperator<SensorReading> mapStream = inputStream.map(new MapFunction<String, SensorReading>() {
+                  @Override
+                  public SensorReading map(String s) throws Exception {
+                     String[] fields = s.split(",");
+                     return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+                  }
+               });
+         
+               // 4. 将流转换成表，定义时间特性
+               Table dataTable = tableEnv.fromDataStream(mapStream, "id, timestamp as ts, temperature as temp, pt.proctime");
+         
+               dataTable.printSchema();
+         
+               tableEnv.toAppendStream(dataTable, Row.class).print();
+         
+               env.execute();
+         
+            }
+         
+         }
+         
+         ~~~
+
+         ![flink_table_time_01](pic/flink_table_time_01.png)
+
+   2. 定义Table Schema时指定
+
+      ~~~java
+      .withSchema(new Schema()
+      .field("id", DataTypes.STRING())
+      .field("timestamp", DataTypes.BIGINT())
+      .field("temperature", DataTypes.DOUBLE())
+      .field("pt", DataTypes.TIMESTAMP(3))
+      .proctime()
+      )
+      ~~~
+
+   3. 在创建表的DDL中定义
+
+      ~~~java
+      String sinkDDL =
+      "create table dataTable (" + 
+        " id varchar(20) not null, " + 
+        " ts bigint, " + 
+        " temperature double, " + 
+        " pt AS PROCTIME() " + 
+        ") with (" + 
+        " 'connector.type' = 'filesystem', " + 
+        " 'connector.path' = '/sensor.txt', " + 
+        " 'format.type' = 'csv')";
+      tableEnv.sqlUpdate(sinkDDL);
+      ~~~
+
+      
+
+3. 定义事件时间（Event Time）
+
+   - 事件时间语义，允许表处理程序根据每个记录中包含的时间生成结果。这样即时在有乱序事件或者延迟事件时，也可以获得正确的结果。
+
+   - 为了处理无序事件，并区分流中的准时和迟到事件，Flink需要从事件数据中，提取时间戳，并用来推进时间时间的进展
+
+   - 定义事件时间，也有三种方式：
+
+     1. 由DataStream转换成表时指定
+
+        - 在 DataStream 转换成 Table，使用 .rowtime 可以定义事件时间属性
+
+          ~~~java
+          package com.kyle.api.table;
+          
+          import com.kyle.bean.SensorReading;
+          import org.apache.flink.api.common.functions.MapFunction;
+          import org.apache.flink.streaming.api.datastream.DataStreamSource;
+          import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+          import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+          import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
+          import org.apache.flink.streaming.api.windowing.time.Time;
+          import org.apache.flink.table.api.Table;
+          import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+          import org.apache.flink.types.Row;
+          
+          /**
+           * @author kyle on 2021-12-19 3:27 下午
+           */
+          public class TableTest10_TimeAndWindow_Event {
+          
+             public static void main(String[] args) throws Exception {
+          
+          
+                // 1. 创建环境
+                StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+                env.setParallelism(1);
+          
+                StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+          
+          
+                // 读入文件数据， 得到DataStream
+                String filePath = "/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor_table.txt";
+                DataStreamSource<String> inputStream = env.readTextFile(filePath);
+          
+          
+                // 3. 转换成POJO
+                // 转换成 SensorReading 类型
+                SingleOutputStreamOperator<SensorReading> mapStream = inputStream.map(new MapFunction<String, SensorReading>() {
+                   @Override
+                   public SensorReading map(String s) throws Exception {
+                      String[] fields = s.split(",");
+                      return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+                   }
+                })
+                        .assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor<SensorReading>(Time.seconds(2)) {
+                           @Override
+                           public long extractTimestamp(SensorReading element) {
+                              return element.getTimestamp() * 1000;
+                           }
+                        });
+          
+                // 4. 将流转换成表，定义时间特性
+                Table dataTable = tableEnv.fromDataStream(mapStream, "id, timestamp as ts, temperature as temp, rt.rowtime");
+                
+                dataTable.printSchema();
+          
+                tableEnv.toAppendStream(dataTable, Row.class).print();
+          
+                env.execute();
+          
+             }
+          
+          }
+          
+          ~~~
+
+          ![flink_table_time_02](https://tva1.sinaimg.cn/large/008i3skNgy1gxj7clf981j30t80l6dic.jpg)
+
+     2. 定义 Table Schema 时指定
+
+        ~~~java
+        .withSchema(new Schema()
+        .field("id", DataTypes.STRING())
+        .field("timestamp", DataTypes.BIGINT())
+        .rowtime(
+        new Rowtime()
+        .timestampsFromField("timestamp") // 从字段中提取时间戳
+        .watermarksPeriodicBounded(1000) // watermark延迟1秒 )
+        .field("temperature", DataTypes.DOUBLE())
+        )
+        ~~~
+
+        
+
+     3. 在创建表的 DDL 中定义
+
+        ~~~java
+        String sinkDDL=
+        "create table dataTable (" + 
+          " id varchar(20) not null, " + 
+          " ts bigint, " + 
+          " temperature double, " + 
+          " rt AS TO_TIMESTAMP( FROM_UNIXTIME(ts) ), " + 
+          " watermark for rt as rt - interval '1' second" + 
+          ") with (" + 
+          " 'connector.type' = 'filesystem', " + 
+          " 'connector.path' = '/sensor.txt', " + 
+          " 'format.type' = 'csv')";
+        tableEnv.sqlUpdate(sinkDDL);
+        ~~~
+
+
+
+
+## 11.3 窗口
+
+### 11.3.1 简述
+
+1. 窗口
+
+   > 时间语义，要配合窗口操作才能发挥作用
+
+   - 在Table API 和SQL 中 主要有两种窗口
+     1. 分组窗口（Groups Windows）
+        - 根据时间或者行计数间隔，将行聚合到有限的组（Group）中，并对每个组的数据执行一次聚合函数
+     2. Over Windows
+        - 针对每个输入行，计算相邻行范围内的聚合
+
+### 11.3.2 分组窗口
+
+2. Table API 中的分组窗口（Groups Windows）
+
+   - 是使用window（w.GroupWindow）子句定义的，并且必须由as子句指定一个别名
+
+   - 为了按窗口对表进行分组，窗口的别名必须在group by子句中，像常规的分组字段一样引用
+
+     ~~~java
+     Table table = input
+     .window([w: GroupWindow] as "w") // 定义窗口，别名为 w
+     .groupBy("w, a") // 按照字段 a和窗口 w分组
+     .select("a, b.sum"); // 聚合
+     ~~~
+
+   - 滚动窗口
+
+     > 滚动窗口要用Tumble类来定义
+
+     ~~~java
+     // Tumbling Event-time Window 事件时间滚动窗口
+     .window(Tumble.over("10.minutes").on("rowtime").as("w"))
+     // Tumbling Processing-time Window 处理时间滚动窗口
+     .window(Tumble.over("10.minutes").on("proctime").as("w"))
+     // Tumbling Row-count Window 滚动计数窗口
+     .window(Tumble.over("10.rows").on("proctime").as("w"))
+     ~~~
+
+   - 滑动窗口
+
+     > 滑动窗口要用Slide类定义
+
+     ~~~java
+     // Sliding Event-time Window
+     // 长度是10分钟，5分钟滑动一次的 事件时间窗口
+     .window(Slide.over("10.minutes").every("5.minutes").on("rowtime").as("w"))
+     // Sliding Processing-time window  处理时间窗口
+     .window(Slide.over("10.minutes").every("5.minutes").on("proctime").as("w"))
+     // Sliding Row-count window 滑动计数窗口
+     .window(Slide.over("10.rows").every("5.rows").on("proctime").as("w"))
+     ~~~
+
+   - 会话窗口
+
+     > 会话窗口要用 Session 类定义
+
+     ~~~java
+     // Session Event-time Window
+     .window(Session.withGap("10.minutes").on("rowtime").as("w"))
+     // Session Processing-time Window
+     .window(Session.withGap("10.minutes").on(“proctime").as("w"))
+     ~~~
+
+2. SQL 中的分组窗口（Group Windows）
+
+   - Group Windows定义在SQL查询的 Group By子句中
+   1. TUMBLE(time_attr, interval)
+        - 定义一个滚动窗口，第一个参数是时间字段，第二个参数是窗口长度
+   2. HOP(time_attr, interval, interval)
+        - 定义一个滑动窗口，第一个参数是时间字段，第二个参数是窗口滑动步长，第三个是窗口长度
+   3. SESSION(time_attr, interval)
+        - 定义一个会话窗口，第一个参数是时间字段，第二个参数是窗口间隔
+
+3. demo代码
+
+   ~~~java
+   package com.kyle.api.table;
+   
+   import static org.apache.flink.table.api.Expressions.*;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
+   import org.apache.flink.streaming.api.windowing.time.Time;
+   import org.apache.flink.table.api.Table;
+   import org.apache.flink.table.api.TableResult;
+   import org.apache.flink.table.api.Tumble;
+   import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+   import org.apache.flink.types.Row;
+   
+   /**
+    * @author kyle on 2021-12-21 6:27 上午
+    */
+   public class TableTest11_TimeAndWindow_Group {
+   
+      public static void main(String[] args) throws Exception {
+   
+   
+         // 1. 创建环境
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+         env.setParallelism(1);
+   
+         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+   
+   
+         // 读入文件数据， 得到DataStream
+         String filePath = "/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor_table.txt";
+         DataStreamSource<String> inputStream = env.readTextFile(filePath);
+   
+   
+         // 3. 转换成POJO
+         // 转换成 SensorReading 类型
+         SingleOutputStreamOperator<SensorReading> mapStream = inputStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(",");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         })
+                 .assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor<SensorReading>(Time.seconds(2)) {
+                    @Override
+                    public long extractTimestamp(SensorReading element) {
+                       return element.getTimestamp() * 1000;
+                    }
+                 });
+   
+         // 4. 将流转换成表，定义时间特性
+         Table dataTable = tableEnv.fromDataStream(mapStream, "id, timestamp as ts, temperature as temp, rt.rowtime");
+   
+         tableEnv.createTemporaryView("sensor", dataTable);
+   
+   
+         // 5. 窗口操作
+         // 5.1 Group Window
+         // table API
+   
+         Table resApiTable = dataTable.window(Tumble.over("10.seconds").on("rt").as("tw"))
+                 .groupBy($("id"), $("tw"))
+                 .select($("id"), $("id").count(), $("temp").avg(), $("tw").end());
+   
+   
+         // SQL
+         Table resultSqlTable = tableEnv.sqlQuery("select id, count(id) as cnt, avg(temp) as avgTemp, tumble_end(rt, interval '10' second) as tw_end " +
+                 "from sensor group by id, tumble(rt, interval '10' second)");
+   
+   
+   //      dataTable.printSchema();
+   
+         tableEnv.toRetractStream(resApiTable, Row.class).print("api");
+         tableEnv.toRetractStream(resultSqlTable, Row.class).print("sql");
+   
+         env.execute();
+   
+      }
+   
+   }
+   
+   ~~~
+
+   - 代码开窗是 10s， 没有设置偏移量，所以按照数据推算：
+     - 第一个时间窗是[1547718190, 1547718200)
+     - 第二个时间窗是[1547718200, 1547718210)
+     - ...
+     - 以sensor_01为例，在第二个窗口中包含了两条数据，所以在输出中可以看到cnt=2， avgTemp是两条记录的温度平均值，并且api和sql的输出是一致的
+       - api> (true,sensor_01,2,31.3,2019-01-17T09:43:30)
+       - sql> (true,sensor_01,2,31.3,2019-01-17T09:43:30)
+
+   ~~~java
+   // 测试数据
+   sensor_01,1547718199,35.8
+   sensor_01,1547718200,31.8
+   sensor_01,1547718201,30.8
+   sensor_02,1547718201,15.4
+   sensor_03,1547718202,6.7
+   sensor_04,1547718205,38.1
+   sensor_01,1547718210,36.8
+   sensor_01,1547718222,34.8
+   sensor_06,1547718222,34.8
+   
+   
+   
+   // 输出
+   api> (true,sensor_01,1,35.8,2019-01-17T09:43:20)
+   api> (true,sensor_01,2,31.3,2019-01-17T09:43:30)
+   api> (true,sensor_03,1,6.7,2019-01-17T09:43:30)
+   api> (true,sensor_04,1,38.1,2019-01-17T09:43:30)
+   api> (true,sensor_02,1,15.4,2019-01-17T09:43:30)
+   api> (true,sensor_01,1,36.8,2019-01-17T09:43:40)
+   api> (true,sensor_01,1,34.8,2019-01-17T09:43:50)
+   api> (true,sensor_06,1,34.8,2019-01-17T09:43:50)
+   
+   sql> (true,sensor_01,1,35.8,2019-01-17T09:43:20)
+   sql> (true,sensor_01,2,31.3,2019-01-17T09:43:30)
+   sql> (true,sensor_03,1,6.7,2019-01-17T09:43:30)
+   sql> (true,sensor_04,1,38.1,2019-01-17T09:43:30)
+   sql> (true,sensor_02,1,15.4,2019-01-17T09:43:30)
+   sql> (true,sensor_01,1,36.8,2019-01-17T09:43:40)
+   sql> (true,sensor_01,1,34.8,2019-01-17T09:43:50)
+   sql> (true,sensor_06,1,34.8,2019-01-17T09:43:50
+   
+   
+   ~~~
+
+
+
+### 11.3.3 Over Windows
+
+1. Over Windows 聚合是标准SQL中已有的（over子句），可以在查询的SELECT子句中定义
+
+2. Over Windows聚合， 会针对每个输入行，计算相邻行范围内的聚合
+
+3. Over Windows使用window（w.overwindows*）子句定义，并在select()方法中通过别名来引用
+
+   ~~~java
+   Table table = input
+   .window([w: OverWindow] as "w")
+   .select("a, b.sum over w, c.min over w");
+   ~~~
+
+4. 无界 Over Windows
+
+   - 可以在事件时间或者处理时间，以及指定为时间间隔，或者计数的范围内，定义Over Windows
+   - 无界的Over Windows是使用常量指定的
+
+   ~~~java
+   // 无界的事件时间 over window
+   .window(Over.partitionBy("a").orderBy("rowtime").preceding(UNBOUNDED_RANGE).as("w"))
+   //无界的处理时间 over window
+   .window(Over.partitionBy("a").orderBy("proctime").preceding(UNBOUNDED_RANGE).as("w"))
+   // 无界的事件时间 Row-count over window
+   .window(Over.partitionBy("a").orderBy("rowtime").preceding(UNBOUNDED_ROW).as("w"))
+   //无界的处理时间 Row-count over window
+   .window(Over.partitionBy("a").orderBy("proctime").preceding(UNBOUNDED_ROW).as("w"))
+   ~~~
+
+5. 有界 Over Windows
+
+   - 有界的Over Windows 是用间隔的大小指定的
+
+   ~~~java
+   // 有界的事件时间 over window
+   .window(Over.partitionBy("a").orderBy("rowtime").preceding("1.minutes").as("w"))
+   // 有界的处理时间 over window
+   .window(Over.partitionBy("a").orderBy("proctime").preceding("1.minutes").as("w"))
+   // 有界的事件时间 Row-count over window
+   .window(Over.partitionBy("a").orderBy("rowtime").preceding("10.rows").as("w"))
+   // 有界的处理时间 Row-count over window
+   .window(Over.partitionBy("a").orderBy("procime").preceding("10.rows").as("w"))
+   ~~~
+
+6. SQL中的 Over Windows
+
+   - 用 Over Windows 做窗口聚合时，所有聚合必须在同一窗口上定义，也就是说必须是相同的分区、排序和范围
+   - 目前仅支持在当前行范围之前的窗口
+   - ORDER BY必须在单一的时间属性上定义
+
+   ~~~sql
+   SELECT COUNT(amount) OVER (
+   PARTITION BY user
+   ORDER BY proctime
+   ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)
+   FROM Orders
+   ~~~
+
+7. demo 代码
+
+   ~~~java
+   package com.kyle.api.table;
+   
+   import com.kyle.bean.SensorReading;
+   import org.apache.flink.api.common.functions.MapFunction;
+   import org.apache.flink.streaming.api.datastream.DataStreamSource;
+   import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+   import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+   import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
+   import org.apache.flink.streaming.api.windowing.time.Time;
+   import org.apache.flink.table.api.Over;
+   import org.apache.flink.table.api.Table;
+   import org.apache.flink.table.api.Tumble;
+   import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+   import org.apache.flink.types.Row;
+   
+   import static org.apache.flink.table.api.Expressions.$;
+   
+   /**
+    * @author kyle on 2021-12-21 6:27 上午
+    */
+   public class TableTest12_TimeAndWindow_OverWindows {
+   
+      public static void main(String[] args) throws Exception {
+   
+   
+         // 1. 创建环境
+         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+         env.setParallelism(1);
+   
+         StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+   
+   
+         // 读入文件数据， 得到DataStream
+         String filePath = "/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor_table.txt";
+         DataStreamSource<String> inputStream = env.readTextFile(filePath);
+   
+   
+         // 3. 转换成POJO
+         // 转换成 SensorReading 类型
+         SingleOutputStreamOperator<SensorReading> mapStream = inputStream.map(new MapFunction<String, SensorReading>() {
+            @Override
+            public SensorReading map(String s) throws Exception {
+               String[] fields = s.split(",");
+               return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+            }
+         })
+                 .assignTimestampsAndWatermarks(new BoundedOutOfOrdernessTimestampExtractor<SensorReading>(Time.seconds(2)) {
+                    @Override
+                    public long extractTimestamp(SensorReading element) {
+                       return element.getTimestamp() * 1000;
+                    }
+                 });
+   
+         // 4. 将流转换成表，定义时间特性
+         Table dataTable = tableEnv.fromDataStream(mapStream, "id, timestamp as ts, temperature as temp, rt.rowtime");
+   
+         tableEnv.createTemporaryView("sensor", dataTable);
+   
+   
+         // 5. 窗口操作
+         // 5.1 Group Window
+         // table API
+   
+   //      Table resApiTable = dataTable.window(Tumble.over("10.seconds").on("rt").as("tw"))
+   //              .groupBy($("id"), $("tw"))
+   //              .select($("id"), $("id").count(), $("temp").avg(), $("tw").end());
+   
+   
+         // SQL
+   //      Table resultSqlTable = tableEnv.sqlQuery("select id, count(id) as cnt, avg(temp) as avgTemp, tumble_end(rt, interval '10' second) as tw_end " +
+   //              "from sensor group by id, tumble(rt, interval '10' second)");
+   
+   
+   //      dataTable.printSchema();
+   
+   //      tableEnv.toRetractStream(resApiTable, Row.class).print("api");
+   //      tableEnv.toRetractStream(resultSqlTable, Row.class).print("sql");
+   
+   
+   
+         // 5.2 Over Windows
+         // table API
+         Table overResult = dataTable.window(Over.partitionBy($("id")).orderBy($("rt")).preceding("2.rows").as("ow"))
+                 .select("id, rt, id.count over ow, temp.avg over ow");
+   //              .select($("id"), $("rt"), $("id").over("ow").count(), $("temp").over("ow").avg());
+   
+   
+         // SQL
+         Table sqlResult = tableEnv.sqlQuery("select id, rt, count(id) over ow, avg(temp) over ow " +
+                 " from sensor " +
+                 " window ow as (partition by id order by rt rows between 2 preceding and current row)");
+   
+         tableEnv.toRetractStream(overResult, Row.class).print("api");
+   //      tableEnv.toRetractStream(sqlResult, Row.class).print("sql");
+   
+   
+         env.execute();
+   
+      }
+   
+   }
+   
+   ~~~
+
+   - 代码开窗是取当前行和及其前两行作为一个窗口
+
+   - 以sensor_01 为例：
+
+     - 第一条 sensor_01 记录来了正常输出
+     - 第二条 sensor_01 记录来了 cnt=2， 取前两条记录的温度平均
+     - 第三条 sensor_01 记录来了 cnt=3， 取前三条记录的温度平均
+     - 第四条 sensor_01 记录来了 cnt还是3， 取前三条记录的温度平均
+     - ...
+     - 后续的 sensor_01 记录的cnt都是3， 因为窗口每次都只会取当前记录及其前两条记录进行开窗计算。
+
+     ~~~java
+     // 数据
+     sensor_01,1547718199,35.8
+     sensor_01,1547718200,31.8
+     sensor_01,1547718201,30.8
+     sensor_02,1547718201,15.4
+     sensor_03,1547718202,6.7
+     sensor_04,1547718205,38.1
+     sensor_01,1547718210,36.8
+     sensor_01,1547718222,34.8
+     sensor_06,1547718222,34.8
+       
+     // 输出
+     api> (true,sensor_01,2019-01-17T09:43:19,1,35.8)
+     api> (true,sensor_01,2019-01-17T09:43:20,2,33.8)
+     api> (true,sensor_02,2019-01-17T09:43:21,1,15.4)
+     api> (true,sensor_01,2019-01-17T09:43:21,3,32.8)
+     api> (true,sensor_03,2019-01-17T09:43:22,1,6.7)
+     api> (true,sensor_04,2019-01-17T09:43:25,1,38.1)
+     api> (true,sensor_01,2019-01-17T09:43:30,3,33.13333333333333)
+     api> (true,sensor_01,2019-01-17T09:43:42,3,34.13333333333333)
+     api> (true,sensor_06,2019-01-17T09:43:42,1,34.8)
+      
+     sql> (true,sensor_01,2019-01-17T09:43:19,1,35.8)
+     sql> (true,sensor_01,2019-01-17T09:43:20,2,33.8)
+     sql> (true,sensor_02,2019-01-17T09:43:21,1,15.4)
+     sql> (true,sensor_01,2019-01-17T09:43:21,3,32.8)
+     sql> (true,sensor_03,2019-01-17T09:43:22,1,6.7)
+     sql> (true,sensor_04,2019-01-17T09:43:25,1,38.1)
+     sql> (true,sensor_01,2019-01-17T09:43:30,3,33.13333333333333)
+     sql> (true,sensor_01,2019-01-17T09:43:42,3,34.13333333333333)
+     sql> (true,sensor_06,2019-01-17T09:43:42,1,34.8)
+     
+     ~~~
+
+
+
+## 11.4 函数（Funxtions）
+
+### 11.4.1 内置函数
+
+1. Flink Table API 和 SQL 为用户提供了一组用于数据转换的内置函数
+
+2. SQL 中支持的很多函数， Table API 和 SQL 都已经做了实现
+
+3. example
+
+   | -          | Table API                | SQL                       |
+   | ---------- | ------------------------ | ------------------------- |
+   | 比较函数   | ANY1 === ANY2            | value1 = value2           |
+   |            | ANY1 > ANY2              | value1 > value2           |
+   |            |                          |                           |
+   | 逻辑函数   | BOOLEAN1 \|\| BOOLEAN2   | boolean1 OR boolean2      |
+   |            | BOOLEAN.isFalse          | boolean IS FALSE          |
+   |            | !BOOLEAN                 | NOT boolean               |
+   |            |                          |                           |
+   | 算数函数   | NUMERIC1 + NUMERIC2      | numeric1 + numeric2       |
+   |            | NUMERIC1.power(NUMERIC2) | POWER(numeric1, numeric2) |
+   |            |                          |                           |
+   | 字符串函数 | STRING1 + STRING2        | string1 \|\| string2      |
+   |            | STRING.upperCase()       | UPPER(string)             |
+   |            | STRING.charLength()      | CHAR_LENGTH(string)       |
+   |            |                          |                           |
+   | 时间函数   | STRING.toDate            | DATE string               |
+   |            | STRING.toTimestamp       | TIMESTAMP string          |
+   |            | currentTime()            | CURRENT_TIME              |
+   |            |                          | INTERVAL string range     |
+   |            |                          |                           |
+   |            |                          |                           |
+   |            |                          |                           |
+
+
+
+### 11.4.2 UDF 函数
+
+1. 用户定义函数（User-defined Functions）是一个重要的特性，它们显著地扩展了查询的表达能力
+
+2. 在大多数情况下， 用户定义的函数必须先注册，然后才能在查询中使用
+
+3. 函数通过调用registerFunciton() 方法在TableEnvironment中注册。当用户定义的函数被注册时，它被插入到TableEnvironment的函数目录中，这样Table API 或 SQL解析器就可以识别并正确解释它。
+
+4. 标量函数（Scalar Functions）
+
+   - 用户定义的标量函数， 可以将0，1 或多个标量值，映射到新的标量值
+
+   - 为了定义标量函数， 必须在 org.apache.flink.table.functions 中扩展基类Scalar Function，并实现（一个或多个）求值（eval）方法
+
+   - 标量函数的行为由求值方法决定，**求值方法必须公开声明并命名为 eval**
+
+     ~~~java
+     public static class HashCode extends ScalarFunction {
+     private int factor = 13;
+     public HashCode(int factor) {
+     this.factor = factor;
+     }
+     public int eval(String s) {
+     return s.hashCode() * factor; } }
+     ~~~
+
+   - demo
+
+     ~~~java
+     package com.kyle.api.table.udf;
+     
+     import com.kyle.bean.SensorReading;
+     import org.apache.flink.api.common.functions.MapFunction;
+     import org.apache.flink.streaming.api.datastream.DataStreamSource;
+     import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+     import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+     import org.apache.flink.table.api.Table;
+     import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+     import org.apache.flink.table.functions.ScalarFunction;
+     import org.apache.flink.types.Row;
+     
+     /**
+      * @author kyle on 2021-12-21 8:07 上午
+      */
+     public class UdfTest01_ScalarFunction {
+     
+        public static void main(String[] args) throws Exception {
+     
+           // 1. 创建环境
+           StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+           env.setParallelism(1);
+     
+           StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+     
+     
+           // 读入文件数据， 得到DataStream
+           String filePath = "/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor_table.txt";
+           DataStreamSource<String> inputStream = env.readTextFile(filePath);
+     
+     
+           // 3. 转换成POJO
+           // 转换成 SensorReading 类型
+           SingleOutputStreamOperator<SensorReading> mapStream = inputStream.map(new MapFunction<String, SensorReading>() {
+              @Override
+              public SensorReading map(String s) throws Exception {
+                 String[] fields = s.split(",");
+                 return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+              }
+           });
+     
+           // 将流转换成表
+           Table sensorTable = tableEnv.fromDataStream(mapStream, "id, timestamp as ts, temperature as temp");
+     
+           // 4. 自定义标量函数 实现求id的hash值
+           // 4.1 table API
+           HashCode hashCode = new HashCode(2);
+           // 需要在环境中注册udf
+           tableEnv.registerFunction("hashCode", hashCode);
+     
+           Table resultTable = sensorTable.select("id, ts, hashCode(id)");
+     
+     
+           // 4.2 SQL
+           tableEnv.createTemporaryView("sensor", sensorTable);
+           Table resultSqlTable = tableEnv.sqlQuery("select id, ts, hashCode(id) from sensor");
+     
+           tableEnv.toAppendStream(resultTable, Row.class).print("API");
+           tableEnv.toAppendStream(resultSqlTable, Row.class).print("SQL");
+     
+     
+           env.execute();
+     
+     
+        }
+     
+        // 实现自定义的Scalar Function
+        public static class HashCode extends ScalarFunction{
+           private int factor = 13;
+     
+           public HashCode(int factor) {
+              this.factor = factor;
+           }
+     
+           public int eval(String str){
+     
+              return str.hashCode() * factor;
+           }
+     
+     
+        }
+     
+     
+     }
+     
+     ~~~
+
+     - 输出
+
+     ~~~java
+     API> sensor_01,1547718199,941721932
+     SQL> sensor_01,1547718199,941721932
+     API> sensor_01,1547718200,941721932
+     SQL> sensor_01,1547718200,941721932
+     API> sensor_01,1547718201,941721932
+     SQL> sensor_01,1547718201,941721932
+     API> sensor_02,1547718201,941721934
+     SQL> sensor_02,1547718201,941721934
+     API> sensor_03,1547718202,941721936
+     SQL> sensor_03,1547718202,941721936
+     API> sensor_04,1547718205,941721938
+     SQL> sensor_04,1547718205,941721938
+     API> sensor_01,1547718210,941721932
+     SQL> sensor_01,1547718210,941721932
+     API> sensor_01,1547718222,941721932
+     SQL> sensor_01,1547718222,941721932
+     API> sensor_06,1547718222,941721942
+     SQL> sensor_06,1547718222,941721942
+     ~~~
+
+5. 表函数（Table Functions）
+
+   - 用户定义的表函数， 可以将0、1或多个标量值作为输入参数；与标量函数不同的是， 它可以返回任意数量的行作为输出，而不是单个值。
+
+   - 为了定义一个表函数，必须扩展 org.apache.flink.table.functions 中的基类TableFunction 并实现（一个或多个）求值方法
+
+   - 表函数的行为由其求值方法决定，求值方法必须是 public 的，并命名为 eval
+
+     ~~~java
+     public static class Split extends TableFunction<Tuple2<String, Integer>> {
+     private String separator = ",";
+     public Split(String separator) {
+     this.separator = separator;
+     }
+     public void eval(String str) {
+     for (String s : str.split(separator)) {
+     collect(new Tuple2<String, Integer>(s, s.length()));
+     } } }
+     ~~~
+
+   - demo
+
+     ~~~java
+     package com.kyle.api.table.udf;
+     
+     import com.kyle.bean.SensorReading;
+     import org.apache.flink.api.common.functions.MapFunction;
+     import org.apache.flink.api.java.tuple.Tuple2;
+     import org.apache.flink.streaming.api.datastream.DataStreamSource;
+     import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+     import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+     import org.apache.flink.table.api.Table;
+     import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+     import org.apache.flink.table.functions.ScalarFunction;
+     import org.apache.flink.table.functions.TableFunction;
+     import org.apache.flink.types.Row;
+     
+     /**
+      * @author kyle on 2021-12-21 8:07 上午
+      */
+     public class UdfTest02_TableFunction {
+     
+        public static void main(String[] args) throws Exception {
+     
+           // 1. 创建环境
+           StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+           env.setParallelism(1);
+     
+           StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+     
+     
+           // 读入文件数据， 得到DataStream
+           String filePath = "/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor_table.txt";
+           DataStreamSource<String> inputStream = env.readTextFile(filePath);
+     
+     
+           // 3. 转换成POJO
+           // 转换成 SensorReading 类型
+           SingleOutputStreamOperator<SensorReading> mapStream = inputStream.map(new MapFunction<String, SensorReading>() {
+              @Override
+              public SensorReading map(String s) throws Exception {
+                 String[] fields = s.split(",");
+                 return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+              }
+           });
+     
+           // 将流转换成表
+           Table sensorTable = tableEnv.fromDataStream(mapStream, "id, timestamp as ts, temperature as temp");
+     
+           // 4. 自定义表函数 实现 将id拆分，并输出（word，length）
+           // 4.1 table API
+           Split split = new Split("_");
+     
+           // 需要在环境中注册udf
+           tableEnv.registerFunction("split", split);
+     
+           Table resultTable = sensorTable
+                   .joinLateral("split(id) as (word, length)")
+                   .select("id, ts, word, length");
+     
+     
+           // 4.2 SQL
+           tableEnv.createTemporaryView("sensor", sensorTable);
+           Table resultSqlTable = tableEnv.sqlQuery("select id, ts, word, length " +
+                   " from sensor, lateral table(split(id)) as splitid(word, length)");
+     
+           tableEnv.toAppendStream(resultTable, Row.class).print("API");
+     //      tableEnv.toAppendStream(resultSqlTable, Row.class).print("SQL");
+     
+     
+           env.execute();
+     
+     
+        }
+     
+        // 实现自定义的Table Function
+        public static class Split extends TableFunction<Tuple2<String, Integer>> {
+     
+           private String separator = ",";
+     
+           public Split(String separator){
+              this.separator = separator;
+           }
+     
+     
+           // 必须实现一个eval方法， 没有返回值
+           public void eval(String str){
+              for (String s : str.split(separator)) {
+                 collect(new Tuple2<>(s, s.length()));
+              }
+           }
+     
+     
+        }
+     
+     
+     }
+     
+     ~~~
+
+     - 输出
+
+     ~~~java
+     // 数据
+     sensor_01,1547718199,35.8
+     sensor_01,1547718200,31.8
+     sensor_01,1547718201,30.8
+     sensor_02,1547718201,15.4
+     sensor_03,1547718202,6.7
+     sensor_04,1547718205,38.1
+     sensor_01,1547718210,36.8
+     sensor_01,1547718222,34.8
+     sensor_06,1547718222,34.8
+     
+     // 输出
+     API> sensor_01,1547718199,sensor,6
+     API> sensor_01,1547718199,01,2
+     API> sensor_01,1547718200,sensor,6
+     API> sensor_01,1547718200,01,2
+     API> sensor_01,1547718201,sensor,6
+     API> sensor_01,1547718201,01,2
+     API> sensor_02,1547718201,sensor,6
+     API> sensor_02,1547718201,02,2
+     API> sensor_03,1547718202,sensor,6
+     API> sensor_03,1547718202,03,2
+     API> sensor_04,1547718205,sensor,6
+     API> sensor_04,1547718205,04,2
+     API> sensor_01,1547718210,sensor,6
+     API> sensor_01,1547718210,01,2
+     API> sensor_01,1547718222,sensor,6
+     API> sensor_01,1547718222,01,2
+     API> sensor_06,1547718222,sensor,6
+     API> sensor_06,1547718222,06,2
+     ~~~
+
+6. 聚合函数（Aggregate Functions）
+
+   - 用户自定义聚合函数（User-Defined Aggregate Functions，UDAGGs）可以把一个表中的数据，聚合成一个标量值
+
+   - 用户定义的聚合函数，是通过继承 AggregateFunction 抽象类实现的
+
+   - AggregationFunction要求必须实现的方法：
+
+     1. createAccumulator()
+     2. accumulate()
+     3. getValue()
+
+   - AggregateFunction 的工作原理如下： 
+
+     1. 首先，它需要一个累加器（Accumulator），用来保存聚合中间结果的数据结构；可以通过调用 createAccumulator() 方法创建空累加器
+
+     2. 随后，对每个输入行调用函数的 accumulate() 方法来更新累加器
+
+     3. 处理完所有行后，将调用函数的 getValue() 方法来计算并返回最终结果
+
+     ![flink_table_udf_function_agg_01](https://tva1.sinaimg.cn/large/008i3skNgy1gxl5xeqdmxj30ph0cvjsf.jpg)
+
+   - demo
+
+     ~~~java
+     package com.kyle.api.table.udf;
+     
+     import com.kyle.bean.SensorReading;
+     import org.apache.flink.api.common.functions.MapFunction;
+     import org.apache.flink.api.java.tuple.Tuple2;
+     import org.apache.flink.streaming.api.datastream.DataStreamSource;
+     import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+     import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+     import org.apache.flink.table.api.Table;
+     import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+     import org.apache.flink.table.functions.AggregateFunction;
+     import org.apache.flink.table.functions.TableFunction;
+     import org.apache.flink.types.Row;
+     import org.apache.hadoop.yarn.webapp.hamlet.Hamlet;
+     
+     /**
+      * @author kyle on 2021-12-21 8:07 上午
+      */
+     public class UdfTest03_aggFunction {
+     
+        public static void main(String[] args) throws Exception {
+     
+           // 1. 创建环境
+           StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+           env.setParallelism(1);
+     
+           StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+     
+     
+           // 读入文件数据， 得到DataStream
+           String filePath = "/Users/kyle/Documents/kyle/project/learn/flink/src/main/resources/sensor_table.txt";
+           DataStreamSource<String> inputStream = env.readTextFile(filePath);
+     
+     
+           // 3. 转换成POJO
+           // 转换成 SensorReading 类型
+           SingleOutputStreamOperator<SensorReading> mapStream = inputStream.map(new MapFunction<String, SensorReading>() {
+              @Override
+              public SensorReading map(String s) throws Exception {
+                 String[] fields = s.split(",");
+                 return new SensorReading(fields[0], Long.parseLong(fields[1]), Double.parseDouble(fields[2]));
+              }
+           });
+     
+           // 将流转换成表
+           Table sensorTable = tableEnv.fromDataStream(mapStream, "id, timestamp as ts, temperature as temp");
+     
+           // 4. 自定义表函数 实现 分区求平均温度
+           // 4.1 table API
+           AvgTemp avgTemp = new AvgTemp();
+     
+           // 需要在环境中注册udf
+           tableEnv.registerFunction("avgTemp", avgTemp);
+     
+           Table resultTable = sensorTable
+                   .groupBy("id")
+                   .aggregate("avgTemp(temp) as avgtemp")
+                   .select("id, avgtemp");
+     
+     
+           // 4.2 SQL
+           tableEnv.createTemporaryView("sensor", sensorTable);
+           Table resultSqlTable = tableEnv.sqlQuery("select id, avgTemp(temp) as avgtemp" +
+                   " from sensor group by id");
+     
+           tableEnv.toRetractStream(resultTable, Row.class).print("API");
+     //      tableEnv.toAppendStream(resultSqlTable, Row.class).print("SQL");
+     
+     
+           env.execute();
+     
+     
+        }
+     
+        // 实现自定义的 aggregate Function
+        public static class AvgTemp extends AggregateFunction<Double, Tuple2<Double, Integer>> {
+     
+     
+           @Override
+           public Double getValue(Tuple2<Double, Integer> accumulator) {
+              return accumulator.f0 / accumulator.f1;
+           }
+     
+           @Override
+           public Tuple2<Double, Integer> createAccumulator() {
+              return new Tuple2<>(0.0, 0);
+           }
+     
+           // 必须实现一个accumulate方法， 来数据之后更新状态
+           // 方法名 必须是 accumulate
+           public void accumulate(Tuple2<Double, Integer> accumulator, Double temp){
+              accumulator.f0 += temp;
+              accumulator.f1 ++;
+     
+           }
+     
+     
+        }
+     
+     
+     }
+     
+     ~~~
+     
+     - 输出
+     
+     ~~~java
+     // 数据
+     sensor_01,1547718199,35.8
+     sensor_01,1547718200,31.8
+     sensor_01,1547718201,30.8
+     sensor_02,1547718201,15.4
+     sensor_03,1547718202,6.7
+     sensor_04,1547718205,38.1
+     sensor_01,1547718210,36.8
+     sensor_01,1547718222,34.8
+     sensor_06,1547718222,34.8
+     
+     
+     // 输出
+     API> (true,sensor_01,35.8)
+     API> (false,sensor_01,35.8)
+     API> (true,sensor_01,33.8)
+     API> (false,sensor_01,33.8)
+     API> (true,sensor_01,32.8)
+     API> (true,sensor_02,15.4)
+     API> (true,sensor_03,6.7)
+     API> (true,sensor_04,38.1)
+     API> (false,sensor_01,32.8)
+     API> (true,sensor_01,33.8)
+     API> (false,sensor_01,33.8)
+     API> (true,sensor_01,34.0)
+     API> (true,sensor_06,34.8)
+     ~~~
+     
+     
+     
+     
+     
+     
+     
+     
+     
+     
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
