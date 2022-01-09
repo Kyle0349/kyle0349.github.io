@@ -2055,10 +2055,10 @@ public class PartitionTest_01 {
    >
    > 需要传4个参数：
    >
-   > <IN> – The type of the input value.  --- 调用keyby的流的类型
-   > <OUT> – The type of the output value.  --- 窗口函数返回的类型
-   > <KEY> – The type of the key.   --- 
-   > <W> – The type of Window that this window function can be applied on.   --- 需要实现窗口的类型，
+   > - <IN> The type of the input value.  --- 调用keyby的流的类型
+   > - <OUT> The type of the output value.  --- 窗口函数返回的类型
+   > - <KEY> - The type of the key.   --- 
+   > - <W> - The type of Window that this window function can be applied on.   --- 需要实现窗口的类型，
 
    ~~~java
    package com.kyle.api.window;
@@ -4368,7 +4368,7 @@ env.setParallelism(1);
 
 
 
-### 11.2.12 时间特性 （Time Attributes）
+### 11.2.12  引入proctime/rowtime - 时间特性 （Time Attributes）
 
 1. 简述
    1. 基于时间的操作（比如Table API 和 SQL中窗口操作）， 需要定义相关的时间语义和时间数据来源的信息
@@ -4384,7 +4384,7 @@ env.setParallelism(1);
 
       1. 在定义schema期间，可以使用.proctime, 指定字段名定义处理时间字段
 
-      2. 这个proctime属性只能通过附加逻辑字段，来扩展物理schema。因此只能在schema定义的末尾定义
+      2. 这个proctime属性只能通过附加逻辑字段，来扩展物理schema。因此只能在schema定义的末尾定义(测试放在前面也不报错)
 
       3. ~~~java
          package com.kyle.api.table;
@@ -4538,6 +4538,7 @@ env.setParallelism(1);
                         });
           
                 // 4. 将流转换成表，定义时间特性
+                // rt.rowtime 的使用需要前面做了提取时间戳和watermark
                 Table dataTable = tableEnv.fromDataStream(mapStream, "id, timestamp as ts, temperature as temp, rt.rowtime");
                 
                 dataTable.printSchema();
@@ -4551,11 +4552,11 @@ env.setParallelism(1);
           }
           
           ~~~
-
+          
           ![flink_table_time_02](https://tva1.sinaimg.cn/large/008i3skNgy1gxj7clf981j30t80l6dic.jpg)
-
+     
      2. 定义 Table Schema 时指定
-
+     
         ~~~java
         .withSchema(new Schema()
         .field("id", DataTypes.STRING())
@@ -4567,11 +4568,11 @@ env.setParallelism(1);
         .field("temperature", DataTypes.DOUBLE())
         )
         ~~~
-
+     
         
-
+     
      3. 在创建表的 DDL 中定义
-
+     
         ~~~java
         String sinkDDL=
         "create table dataTable (" + 
