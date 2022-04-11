@@ -1,4 +1,4 @@
-# Flink的部署方式
+# Flink的部署方式和提交任务
 
 ## 1. Local
 
@@ -117,7 +117,87 @@
 
 ### 3.1 Session Mode 会话模式
 
-> 在yarn上申请一个固定的flink集群，然后所有的任务都共享这个集群内的资源，
+> 在yarn上申请一个固定的flink集群，所有的任务都共享这个集群内的资源，
+
+#### 3.1.1 启动yarn-session
+
+1. 在  /opt/flink-1.12.5/bin目录下执行 【yarn-session.sh】脚本
+
+   ```bash
+   # --detached 转变为 detached mode 解除绑定模式。本地客户端提交任务到集群后，就会释放本地客户端的窗口。
+   bin/yarn-session.sh --detached
+   
+   # 使用 --detached后， 启动日志里面会给到停止集群的命令
+   # The Flink YARN session cluster has been started in detached mode. In order to stop Flink gracefully, use the following command:
+   $ echo "stop" | ./bin/yarn-session.sh -id application_1649144595349_0005
+   If this should not be possible, then you can also kill Flink via YARN's web interface or via:
+   $ yarn application -kill application_1649144595349_0005
+   Note that killing Flink might not clean up all job artifacts and temporary files.
+   ```
+
+   <img src="https://tva1.sinaimg.cn/large/e6c9d24egy1h16jxfnl45j21no0js170.jpg" alt="flink1.12.5" style="zoom:40%;" />
+
+   
+
+2. 在日志里面也可以看到有Flink管理页面的地址， 端口每次启动都会改变，
+
+   <img src="https://tva1.sinaimg.cn/large/e6c9d24egy1h16k6c919hj21oe0futim.jpg" alt="image-20220412065623274" style="zoom:40%;" />
+
+   
+
+3. 在yarn上面可查看到对应的任务是running状态 http://192.168.31.100:8088/cluster
+
+   <img src="https://tva1.sinaimg.cn/large/e6c9d24egy1h16k3igv4jj22g80byju7.jpg" alt="image-20220412065335519" style="zoom:40%;" />
+
+4. 可以在同一个yarn集群里面启动多个flink的session mode
+
+   ```bash
+   # 因为 detached 是解除绑定模式， 启动完第一个flink后， 在同一个窗口马上重复执行以下命令，就可以启动第二个flink session
+   bin/yarn-session.sh --detached
+   ```
+
+   > 如下yarn上面的两个flink session cluster都处于running状态， 它们的application id是不同的。
+
+   <img src="https://tva1.sinaimg.cn/large/e6c9d24egy1h16kibc0svj22ga0hs42s.jpg" alt="image-20220412070753115" style="zoom:40%;" />
+
+
+
+#### 3.1.2 session mode下提交任务
+
+1. 提交任务
+
+   >1、参数
+   >
+   >-t: 指定是使用yarn session模式提交任务
+   >
+   >-Dyarn.application.id: 通过这个参数指定yarn上面的flink session cluster。因为上面说到可以启动多个flink session cluster
+   >
+   >2、提交任务后，对应的flink session clustrer任务会获得相应的cpu和内存资源，任务执行完后，会重新释放
+
+   ```bash
+   # 使用flink自带的wordcount示例
+   ./bin/flink run -t yarn-session -Dyarn.application.id=application_1649144595349_0005 ./examples/streaming/WordCount.jar 
+   ```
+
+2. 查看提交的任务
+
+   > 在yarn上面可以看到申请的资源数量
+
+   <img src="https://tva1.sinaimg.cn/large/e6c9d24egy1h16ks9m7zaj22fy0giae9.jpg" alt="image-20220412071727087" style="zoom:40%;" />
+
+   >在flink 的管理页面上可以看到任务执行时候的jobs，
+
+   <img src="https://tva1.sinaimg.cn/large/e6c9d24egy1h16l06ofqpj22a00bw756.jpg" alt="image-20220412072502557" style="zoom:40%;" />
+
+   >任务执行完后，任务申请的资源会回归到 flink的 Available Task Slots 
+
+   <img src="https://tva1.sinaimg.cn/large/e6c9d24egy1h16l0mh4rlj21xo0ai3z8.jpg" alt="image-20220412072528875" style="zoom:40%;" />
+
+      >过一段时间没有任务执行， flink session cluster会将这些可用资源重新释放给yarn
+
+   <img src="https://tva1.sinaimg.cn/large/e6c9d24egy1h16l9q9tymj22260aagme.jpg" alt="image-20220412073415568" style="zoom:40%;" />
+
+   
 
 ### 3.2 Application Mode 应用模式
 
