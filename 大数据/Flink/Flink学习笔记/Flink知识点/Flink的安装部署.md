@@ -201,13 +201,73 @@
 
 ### 3.2 Application Mode 应用模式
 
+> 应用模式是指在任务的启动时临时在yarn上面申请一个flink集群。任务从main方法启动就会提交任务到yarn的flink集群执行。执行完成后，集群立马就会注销，释放所有资源，包括flink集群运行的资源。
+
+#### 3.2.1 不需要预先启动flink 集群
+
+#### 3.2.2 Application Mode 下提交任务
+
+1. 提交任务
+
+   > 提交任务时，可以添加一个--detached参数，或者-d参数。这个参数表示本地任务在被提交到flink集群后就释放本地窗口，适合一些长期执行的流式计算
+
+   ```bash
+   ./bin/flink run-application -t yarn-application ./examples/streaming/WordCount.jar 
+   ```
+
+2. 查看集群上正在执行的任务
+
+   ```bash
+   ./bin/flink list -t yarn-application -Dyarn.application.id=application_1649144595349_0008
+   ```
+
+3. 手动停止集群上的任务
+
+   ```
+   ./bin/flink cancel -t yarn-application -Dyarn.application.id=application_1649144595349_0008
+   ```
+
+4. 使用所有节点都能访问到的jar包来提交任务
+
+   ```
+   ./bin/flink run-application -t yarn-application -Dyarn.provided.lib.dirs="hdfs://chd01/flink" hdfs://cdh01/jars/my-application.jar
+   ```
+
 
 
 ### 3.3 Per-job Cluster Mode 单任务模式
 
+> 单任务模式和应用模式很类似，也是给每个应用在yarn上面申请一个单独的flink集群，只不过在这种模式下，任务是先在本地执行，构建数据处理链，构建完成后再将任务提交到flink集群上执行。
+
+#### 3.3.1 不需要预先启动flink集群
+
+#### 3.3.2 Per-job Cluster Mode 下提交任务
+
+1. 提交任务
+
+   > 提交任务时，可以添加一个--detached参数，或者-d参数。这个参数表示本地任务在被提交到flink集群后就释放本地窗口，适合一些长期执行的流式计算
+
+   ```bash
+   ./bin/flink run -t yarn-per-job ./examples/streaming/WordCount.jar 
+   ```
+
+2. 查看集群上正在执行的任务
+
+   ```bash
+   ./bin/flink list -t yarn-per-job -Dyarn.application.id=application_1649144595349_0008
+   ```
+
+3. 手动停止集群上的任务
+
+   ```bash
+   ./bin/flink cancel -t yarn-per-job -Dyarn.application.id=application_1649144595349_0008
+   ```
 
 
 
 
 
+### 3.3 总结
 
+1. session mode会在yarn上面申请一个常驻的flink集群，可以将多个任务提交到同一个flink集群上， 存在风险，如果这个flink挂了，则所有flink任务都受到影响，且flink集群是常驻， 消耗一定的资源。
+2. Application Mode 和 Per-job Cluster Mode 非常类似， Application Mode是在yarn集群中选一台机器作为构建任务处理链，形成执行计划，然后提交到yarn，而 Per-job Cluster Mode则是在本地处理执行计划，再提交到yarn上面。  Per-job Cluster Mode一定程度上更节约集群资源，利用率更高，所以生产环境大多采用 Per-job Cluster Mode。
