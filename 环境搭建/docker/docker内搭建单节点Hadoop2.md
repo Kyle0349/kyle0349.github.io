@@ -78,6 +78,10 @@ COPY mysql-connector-java-5.1.47-bin.jar /opt/software/apache-hive-1.2.1-bin/lib
 COPY flink-shaded-hadoop-2-uber-2.7.5-10.0.jar /opt/software/flink-1.12.5/lib/flink-shaded-hadoop-2-uber-2.7.5-10.0.jar
 COPY flink-connector-jdbc_2.12-1.12.5.jar /opt/software/flink-1.12.5/lib/flink-connector-jdbc_2.12-1.12.5.jar
 COPY flink-connector-mysql-cdc-1.3.0.jar /opt/software/flink-1.12.5/lib/flink-connector-mysql-cdc-1.3.0.jar
+COPY flink-connector-kafka_2.12-1.12.0.jar /opt/software/flink-1.12.5/lib/flink-connector-kafka_2.12-1.12.0.jar
+COPY flink-streaming-core.jar /opt/software/flink-1.12.5/lib/flink-streaming-core.jar
+COPY flink-csv-1.12.5.jar /opt/software/flink-1.12.5/lib/flink-csv-1.12.5.jar
+COPY flink-json-1.12.5.jar /opt/software/flink-1.12.5/lib/flink-json-1.12.5.jar
 # 创建需要的文件夹
 RUN mkdir /opt/software/hadoop-2.7.7/tmp
 RUN mkdir -p /opt/software/hadoop-2.7.7/dfs/namenode_data
@@ -161,6 +165,16 @@ load data local inpath '/home/kyle0349/test.txt' into table t_test;
 ### 测试flink
 /opt/software/flink-1.12.5/bin/flink run -t yarn-per-job /opt/software/flink-1.12.5/examples/streaming/WordCount.jar 
 
+
+### kafka
+# kafka不能用子网的形式，不然本地idea的flink程序消费不到kafka， 有待研究
+docker run --name kafka \
+-p 9092:9092 \
+-e KAFKA_BROKER_ID=0 \
+-e KAFKA_ZOOKEEPER_CONNECT=192.168.1.100:2181 \
+-e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://192.168.1.100:9092 \
+-e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092 \
+-d  wurstmeister/kafka 
 ```
 
 
