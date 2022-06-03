@@ -175,6 +175,14 @@ docker run --name kafka \
 -e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://192.168.1.100:9092 \
 -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092 \
 -d  wurstmeister/kafka 
+
+
+### pgsql
+docker run -d \
+--name pgsql \
+-p 5432:5432 \
+-e POSTGRES_PASSWORD=root \
+07e2ee723e2d
 ```
 
 
