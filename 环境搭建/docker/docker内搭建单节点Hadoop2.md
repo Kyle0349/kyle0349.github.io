@@ -134,11 +134,22 @@ sudo docker run \
 -p 50070:50070 \
 -p 8088:8088 \
 -p 19888:19888 \
+-p 8041:8041 \
 -p 8042:8042 \
 -p 8081:8081 \
+-p 9000:9000 \
+-p 50020:50020 \
+-p 50075:50075 \
+-p 50010:50010 \
+-p 8021:8021 \
+-p 50030:50030 \
+-p 50060:50060 \
+-p 50090:50090 \
+-p 10000:10000 \
+-p 9083:9083 \
 --net mynetwork \
 --ip 172.22.0.5 \
-1c91a134a8e8
+3b1b9084f848
 
 ## 免密设置
 ssh-keygen -t rsa -C "kyle0349@126.com"
@@ -161,6 +172,7 @@ create table t_test(id int,tel string) ROW FORMAT DELIMITED FIELDS TERMINATED BY
 3,kyle
 4,susu
 load data local inpath '/home/kyle0349/test.txt' into table t_test;
+select count(1) from t_test;
 
 ### 测试flink
 /opt/software/flink-1.12.5/bin/flink run -t yarn-per-job /opt/software/flink-1.12.5/examples/streaming/WordCount.jar 
@@ -183,7 +195,21 @@ docker run -d \
 -p 5432:5432 \
 -e POSTGRES_PASSWORD=root \
 07e2ee723e2d
+
+
+docker run -d \
+--name airflow  \
+-v /Users/kyle/Documents/software/docker/airflow/dags:/usr/local/airflow/dags \
+-v /Users/kyle/Documents/software/docker/airflow/airflowSql:/usr/local/airflow/airflowSql  \
+-v /Users/kyle/Documents/software/docker/airflow/cfg:/usr/local/airflow \
+-p 8080:8080 \
+--net mynetwork \
+--ip 172.22.0.10 \
+puckel/docker-airflow 
+
 ```
+
+
 
 
 
