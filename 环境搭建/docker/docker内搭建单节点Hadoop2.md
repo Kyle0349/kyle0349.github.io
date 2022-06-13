@@ -188,6 +188,21 @@ docker run --name kafka \
 -e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092 \
 -d  wurstmeister/kafka 
 
+### kafka 使用子网的方式
+### 注意，在消费kafka的时候 消费的机器需要配置host， 因为消费机器会拿kafka去请求
+#### 192.168.1.110 kafka
+docker run --name kafka \
+-p 9092:9092 \
+-e KAFKA_BROKER_ID=0 \
+--net mynetwork \
+--ip 172.22.0.8 \
+-e KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181 \
+-e KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092 \
+-e KAFKA_LISTENERS=PLAINTEXT://0.0.0.0:9092 \
+-d  wurstmeister/kafka 
+
+
+
 
 ### pgsql
 docker run -d \
