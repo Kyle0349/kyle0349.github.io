@@ -113,9 +113,9 @@ sudo  docker network create --subnet=172.22.0.0/24 mynetwork
 
 # mysql 
 docker run -p 3306:3306 --name mysql \
--v /usr/local/docker/mysql/conf:/etc/mysql \
--v /usr/local/docker/mysql/logs:/var/log/mysql \
--v /usr/local/docker/mysql/data:/var/lib/mysql \
+-v /Users/kyle/Documents/kyle/docker/mysql/conf:/etc/mysql \
+-v /Users/kyle/Documents/kyle/docker/mysql/logs:/var/log/mysql \
+-v /Users/kyle/Documents/kyle/docker/mysql/data:/var/lib/mysql \
 -e MYSQL_ROOT_PASSWORD=root \
 --net mynetwork \
 --ip 172.22.0.6 \

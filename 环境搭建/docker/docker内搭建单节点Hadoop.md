@@ -872,7 +872,13 @@ load data local inpath '/home/kyle0349/test.txt' into table t_test;
 
 
 ## 将运行中的容器打成镜像
-sudo docker commit -a "kyle0349" -m "hadoop-hive-flink-with-mysql-single" 9c202662c09f kyle0349/hadoop-hive-flink-with-mysql-single-1.0
+sudo docker commit -a "kyle0349" -m "hadoop-hive-flink-with-mysql-single" 48223d83ef3d  kyle0349/hadoop-hive-flink-single-1.0
+
+
+
+
+
+
 
 
 ## 备份镜像

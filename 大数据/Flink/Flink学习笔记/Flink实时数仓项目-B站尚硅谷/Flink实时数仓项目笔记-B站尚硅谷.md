@@ -173,69 +173,346 @@
 
  4. 持久化层：存储数据
 
-    
 
-### 1.4.2 Nginx
 
-1. 正向代理
 
-   正向代理类似一个跳板机，代理访问外部资源。比如：我是一个用户，我访问不了某网
 
-   站，但是我能访问一个代理服务器，这个代理服务器，它能访问那个我不能访问的网站，于
 
-   是我先连上代理服务器，告诉它我需要那个无法访问网站的内容，代理服务器去取回来,然
+## 1.5 Flink CDC
 
-   后返回给我。
+### 1.5.1 mysql开启binlog
 
-2. 反向代理
+### 1.5.2 使用 dataStream 实现 Flink CDC
 
-   反向代理（Reverse Proxy）方式是指以代理服务器来接受 internet 上的连接请求，然
+#### 1.5.2.1 自定义反序列化器
 
-   后将请求转发给内部网络上的服务器，并将从服务器上得到的结果返回给 internet 上请求
+#### 1.5.2.2 优点
 
-   连接的客户端，此时代理服务器对外就表现为一个反向代理服务器；
+1. 监控多库多表
 
-3. Nginx的主要作用
+#### 1.5.2.3 缺点
 
-   1. 负载均衡
+1. 需要自己实现反序列化器格式化获取到的数据（同时也可以认为是灵活）
 
-      负载均衡通常是指将请求"均匀"分摊到集群中多个服务器节点上执行，这里的均匀是指
+### 1.5.3 使用 Flink SQL 实现Flink CDC
 
-      在一个比较大的统计范围内是基本均匀的，并不是完全均匀， 常用的负载均衡策略：轮询、权重、备机…
+#### 1.5.3.1 优点
 
-      ![image-20220722062409246](https://tva1.sinaimg.cn/large/e6c9d24egy1h4fau0r9rkj215w0eogmk.jpg)
+1. 直接通过table读取到格式化的数据
 
-   2. 静态代理
+#### 1.5.3.2 缺点
 
-      把所有静态资源的访问改为访问 nginx，而不是访问 tomcat，这种方式叫静态代理。
+1. 只能监控单库单表（因为创建表schema的时候每个表不同）
 
-      因为 nginx 更擅长于静态资源的处理，性能更好，效率更高。
+### 1.5.4 断点续传
 
-      所以在实际应用中，我们将静态资源比如图片、css、html、js 等交给 nginx 处理，而
+Flink CDC 的断点续传 是通过 savepoint实现， 即Flink任务的有状态停止和启动。
 
-      不是由 tomcat 处理
 
-      ![image-20220722062517617](https://tva1.sinaimg.cn/large/e6c9d24egy1h4fav6iwn2j217e0hidhc.jpg)
 
-   3. 动静分离
 
-      Nginx 的负载均衡和静态代理结合在一起，我们可以实现动静分离，这是实际应用中
 
-      常见的一种场景。
+# 2. DWD层数据
 
-      动态资源，如 jsp 由 tomcat 或其他 web 服务器完成
+## 2.2准备用户行为日志 DWD层
 
-      静态资源，如图片、css、js 等由 nginx 服务器完成
+​		前面采集的日志数据已经保存到kafka中，作为日志数据的ODS层，从kafka的ODS层读取日志数据分为3类，页面日志， 启动日志和曝光日志，这3类数据虽然都是用户行为数据，但是有着完全不一样的数据结构，所以要拆分处理。将拆分后的不同日志写会kafka不同主体中，作为日志DWD层。
 
-      它们各司其职，专注于做自己擅长的事情
+### 2.2.1 需求任务
 
-      动静分离充分利用了它们各自的优势，从而达到更高效合理的架构
+#### 2.2.1.1识别新老用户
 
-      ![image-20220722062619354](https://tva1.sinaimg.cn/large/e6c9d24egy1h4faw8x2pcj218q0kamyq.jpg)
+​		本身客户端业务有新老用户的标识，但是不够准确（卸载重装后），需要实时计算再次确认（不涉及业务操作，只是单纯的做个状态确认）。
+
+#### 2.2.1.2 数据分流
+
+1. 页面日志输出到【主流】
+2. 启动日志输出到【启动侧输出流】
+3. 曝光日志输出到【曝光侧输出流】
+
+
+
+### 2.2.2 逻辑梳理
+
+#### 2.2.2.1. 数据源
+
+1. 行为数据：Kafka中的ods层【ods_base_log】
+
+#### 2.2.2.2 脏数据处理
+
+1. 将每一条记录转为jsonObject，入股不是标准的json数据， 则认为是脏数据， 将脏数据输出到侧输出流【Dirty】，后续可以监控**脏数据率**
+
+2. 代码
+
+   ```java
+   // 3.将每行数据转换为JSON对象
+   // kafkaDS.map(JSON::parseObject);
+   // 因为数据可能包含脏数据， 要做 异常处理，将脏数据输出到侧输出流，
+   // 所以这里不用map， 用process，拿到context
+   OutputTag<String> outputTagDirty = new OutputTag<String>("Dirty") {
+   };
+   SingleOutputStreamOperator<JSONObject> jsonObjDS = kafkaDS.process(new ProcessFunction<String, JSONObject>() {
+     @Override
+     public void processElement(String s, Context context, Collector<JSONObject> collector) throws Exception {
+       try {
+         JSONObject jsonObject = JSON.parseObject(s);
+         collector.collect(jsonObject);
+       } catch (Exception e) {
+         // 发生异常，将数据写入侧输出流
+         context.output(outputTagDirty, s);
+       }
+   
+     }
+   });
+   ```
+
+   
+
+#### 2.2.2.3 新老用户的处理逻辑
+
+1. 前端对新老用户标识
+
+   1. 老用户：is_new=0
+   2. 新用户：is_new=1
+
+2. 前端对新老用户标识的问题
+
+   1. **前端标识为老用户的访客， 一定是老用户**，因为前端肯定匹配到了这个用户相关的访问时间信息
+   2. **前端标识位新用户的访客， 不一定真得是新用户**， 因为前端可能会由于数据的缺失导致原本访问过的老用户没有匹配到相关信息而被错误标记为新用户，**例如用户卸载重装app的场景**
+   3. 因此，我们这个需求就是通过Flink在接收埋点数据的同时，**实时对用户是否新老用户进行一次校准**。
+
+3. 数据格式：
+
+   1. 如下数据格式，每条记录都会有【common】，mid和is_new都在这个json体中。
+   1. mid为每个用户的唯一标识
+   1. ts为用户访问的时间戳
+
+   ```json
+   {
+       "common":
+       {
+           "ar": "440000",
+           "ba": "Huawei",
+           "ch": "360",
+           "is_new": "0",
+           "md": "Huawei P30",
+           "mid": "mid_3",
+           "os": "Android 8.1",
+           "uid": "28",
+           "vc": "v2.1.134"
+       },
+       "page":
+       {
+           "during_time": 14552,
+           "item": "1,2,10",
+           "item_type": "sku_ids",
+           "last_page_id": "cart",
+           "page_id": "trade"
+       },
+       "ts": 1608246933000
+   }
+   
+   
+   {
+       "common":
+       {
+           "ar": "420000",
+           "ba": "Xiaomi",
+           "ch": "xiaomi",
+           "is_new": "1",
+           "md": "Xiaomi Mix2 ",
+           "mid": "mid_8",
+           "os": "Android 11.0",
+           "uid": "45",
+           "vc": "v2.0.1"
+       },
+       "page":
+       {
+           "during_time": 11265,
+           "last_page_id": "home",
+           "page_id": "mine"
+       },
+       "ts": 1608246935000
+   }
+   ```
+
+   
+
+4. 判断新老用户：保存每个mid的首次访问日期，每条进入该算子的访问记录，都会把mid对应的首次访问时间读出来，只要首次访问时间不为空，则认为该访客是老用户，否则是新用户。
+
+5. 新用户的处理：
+
+   1. 如果是新用户且没有访问记录的话，将首次访问时间写入状态后端，用于下次读取判断。
+   2. 如果前端显示是新用户， 但是找到访问记录，将记录中的is_new该为0，即设置为老用户
+
+6. 代码（**需要用到状态编程（Flink的状态后端编程）**）
+
+   1. 
+
+   ```java
+   // 4.新老用户校验 状态编程
+   SingleOutputStreamOperator<JSONObject> jsonObjWithNewFlagDS = jsonObjDS.keyBy(jsonObj -> jsonObj.getJSONObject("common").getString("mid"))
+     .map(new RichMapFunction<JSONObject, JSONObject>() {
+   
+       private ValueState<String> valueState;
+   
+       @Override
+       public void open(Configuration parameters) throws Exception {
+         valueState = getRuntimeContext().getState(new ValueStateDescriptor<String>("value-state", String.class));
+       }
+   
+       @Override
+       public JSONObject map(JSONObject value) throws Exception {
+         // 获取数据中的"is_new"标记
+         // 前端数据的json中
+         // 如果 is_new=0，则该用户肯定是老用户， 前台校验是老用户的用户，一定是老用户
+         // 如果 is_new=1, 前端认为是新用户的时候，可能不一定是新用户， 比如卸载重装的时候。
+         // 所以 前台传进来的部分数据中的 is_new经过校验后，需要将 is_new 从1转为 0 输出， 即将前台认为是新用户的改为老用户用
+         String isNew = value.getJSONObject("common").getString("is_new");
+         // 判断isNew是否为"1"
+         if ("1".equals(isNew)) {
+           // 获取状态数据
+           String state = valueState.value();
+           if (state != null) {
+             // 修改isNew标记
+             value.getJSONObject("common").put("is_new", "0");
+           } else {
+             valueState.update("1");
+           }
+         }
+         return value;
+       }
+     });
+   ```
 
    
 
 
+
+
+
+
+
+### 2.2.2 代码解析
+
+
+
+
+
+
+
+
+
+
+
+## 2.3 准备业务库数据  DWD层
+
+​		业务数据的变化，我们可以通过 FlinkCDC 采集到，但是 FlinkCDC 是把全部数据统一写入一个 Topic 中, 这些数据包括事实数据，也包含维度数据，这样显然不利于日后的数据处理，所以这个功能是从 Kafka 的业务数据 ODS 层读取数据，经过处理后，将维度数据保存到 HBase，将事实数据写回 Kafka 作为业务数据的 DWD 层。
+
+### 2.3.1 接收 Kafka 数据，过滤空值数据
+
+对 FlinkCDC 抓取数据进行 ETL，有用的部分保留，没用的过滤掉
+
+### 2.3.2  实现动态分流功能
+
+​		由于 FlinkCDC 是把全部数据统一写入一个 Topic 中, 这样显然不利于日后的数据处理。所以需要把各个表拆开处理。但是由于每个表有不同的特点，有些表是维度表，有些表是事实表。
+
+​		在实时计算中一般把维度数据写入存储容器，一般是方便通过主键查询的数据库比如**HBase**,Redis,MySQL 等。一般把事实数据写入流中，进行进一步处理，最终形成宽表。
+
+> **维度数据存储容器选择**
+>
+> - 因为维度表中有用户维度， 数据量会比较大，所以使用HBase。
+>
+> - 也可以用户维度放HBase， 小维度数据放redis， 但是需要维护两个组件。
+
+​	
+
+这样的配置不适合写在配置文件中，因为这样的话，业务端随着需求变化每增加一张表，就要修改配置重启计算程序。所以这里需要一种动态配置方案，**把这种配置长期保存起来，一旦配置有变化，实时计算可以自动感知。**
+
+> **这种可以有两个方案实现**
+>
+>  - 一种是用 Zookeeper 存储，通过 Watch 感知数据变化； 
+>    - zk是存储+通知组件，实现一个监听事件，
+>  - 另一种是用 mysql 数据库存储，周期性的同步； 
+>    - 在mysql中配置一张表和topic的映射表，因为是周期性同步，如果有改动，需要提前配置，否则数据量会丢数据
+>  - 另一种是用 mysql 数据库存储，使用广播流。
+>    - 主要是Mysql对于配置数据初始化和维护管理， 使用FlinkCDC读取配置信息表，将配置流作为广播流和主流进行连接
+>    - ![image-20220816071543917](pic/image-20220816071543917.png)
+
+
+
+
+
+配置表
+
+```sql
+CREATE TABLE `table_process` (
+`source_table` varchar(200) NOT NULL COMMENT '来源表',
+`operate_type` varchar(200) NOT NULL COMMENT '操作类型 insert,update,delete',
+`sink_type` varchar(200) DEFAULT NULL COMMENT '输出类型 hbase kafka',
+`sink_table` varchar(200) DEFAULT NULL COMMENT '输出表(主题)',
+`sink_columns` varchar(2000) DEFAULT NULL COMMENT '输出字段',
+`sink_pk` varchar(200) DEFAULT NULL COMMENT '主键字段',
+`sink_extend` varchar(200) DEFAULT NULL COMMENT '建表扩展',
+PRIMARY KEY (`source_table`,`operate_type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8
+```
+
+
+
+
+
+广播流：
+
+	1. 解析数据   String -> TableProcess
+	1. 检查Hbase表是否存在并建表
+	1. 写入状态
+
+主流：
+
+	1. 读取状态
+	1. 过滤数据
+	1. 分流
+
+![image-20220817075029907](https://tva1.sinaimg.cn/large/e6c9d24egy1h59ffv7xqtj21aw0pegql.jpg)
+
+
+
+
+
+总结
+
+ODS：
+
+	1. 数据源：行为数据， 业务数据
+	1. 架构分析
+	3. FlinkCDC：
+	 	1. DataStream/FlinkSQL
+	 	2. FlinkCDC
+	1. 保持数据原貌，不做任何修改
+
+DWD-DIM：
+
+ 	1. 行为数据：DWD(Kafka)
+ 	 	1. 过滤脏数据  --> 侧输出流   指标： 脏数据率
+ 	 	2. 新老用户校验   --> 前台校验不准
+ 	 	3. 分流   --> 侧输出流： 页面/启动/曝光/动作/错误
+ 	 	4. 写入kafka
+ 	2. 业务数据：DWD(Kafka) - DIM(Phoenix)
+ 	 	1. 过滤数据 --> 过滤删除操作的数据
+ 	 	2. 读取配置表创建广播流
+ 	 	3. 链接主流和广播流并处理
+ 	     	1. 广播流数据：
+ 	         	1. 解析数据
+ 	         	2. Phoenix建表
+ 	         	3. 写入状态广播
+ 	     	2. 主流数据：
+ 	         	1. 读取状态
+ 	         	2. 过滤字段
+ 	         	3. 分流（添加SinkTable字段）
+ 	 	4. 提取Kafka和HBase流分别对应的数据
+ 	 	5. HBase流：自定义Sink，写入Hbase
+ 	 	6. Kafka流：自定义序列化方式，发送到Kafka
 
 
 
